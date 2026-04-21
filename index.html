@@ -1,0 +1,2730 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Census Atlas — ACS &amp; Decennial Data Explorer</title>
+<meta name="description" content="An intuitive tool for querying ACS and Decennial Census data with universe-aware variable selection, multi-county filtering, and TIGER/Line shapefile downloads." />
+
+<!-- Tailwind CSS via Play CDN -->
+<script src="https://cdn.tailwindcss.com"></script>
+
+<!-- Fonts -->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500;9..144,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+<style>
+  html, body { margin: 0; padding: 0; background: #fafaf9; }
+  body { font-family: "Söhne", "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #loading-screen {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: #fafaf9; z-index: 1000; flex-direction: column; gap: 12px;
+    transition: opacity 240ms ease-out;
+  }
+  #loading-screen.hide { opacity: 0; pointer-events: none; }
+  .spinner {
+    width: 20px; height: 20px; border: 2px solid #d6d3d1; border-top-color: #1c1917;
+    border-radius: 50%; animation: spin 700ms linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading-label {
+    font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 10px;
+    text-transform: uppercase; letter-spacing: 0.15em; color: #78716c;
+  }
+  .loading-title {
+    font-family: "Fraunces", Georgia, serif; font-size: 22px; color: #1c1917; font-weight: 500;
+  }
+</style>
+
+<!-- Map bare module specifiers so Babel's transformed `import` calls resolve.
+     All packages pinned to the same React 18 build to avoid duplicate React. -->
+<script type="importmap">
+{
+  "imports": {
+    "react":            "https://esm.sh/react@18.3.1",
+    "react-dom":        "https://esm.sh/react-dom@18.3.1",
+    "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+    "lucide-react":     "https://esm.sh/lucide-react@0.454.0?deps=react@18.3.1&external=react"
+  }
+}
+</script>
+</head>
+<body>
+
+<div id="loading-screen">
+  <div class="loading-title">Census Atlas</div>
+  <div style="display:flex; align-items:center; gap:10px;">
+    <div class="spinner"></div>
+    <div class="loading-label">Loading…</div>
+  </div>
+</div>
+
+<div id="root"></div>
+
+<!-- Bootstrap: import React + icons, expose globals, then load the transpiled component. -->
+<script type="module">
+  import * as React from 'react';
+  import * as ReactDOMClient from 'react-dom/client';
+  import * as LucideReact from 'lucide-react';
+
+  window.React = React;
+  window.ReactDOM = ReactDOMClient;
+  window.__lucide = LucideReact;
+  // Fire a signal so the Babel block below knows the modules are ready.
+  window.dispatchEvent(new Event('modules-ready'));
+</script>
+
+<!-- Babel Standalone to transpile JSX in the browser. -->
+<script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"></script>
+
+<!-- The component itself. We use a `text/plain` script tag so it isn't parsed
+     until after the ES modules above have loaded and exposed globals. -->
+<script type="text/plain" id="app-source">
+// Pull hooks from the global React injected by the bootstrap module above.
+const { useState, useMemo, useEffect, useRef } = React;
+
+// Pull icon components from the global Lucide namespace.
+const {
+  ChevronRight, ChevronLeft, Database, Map, Calendar, Eye, AlertCircle, Check,
+  ArrowRight, Info, Loader2, Search, Download, Copy, ExternalLink, X, FileText,
+  Layers, Users, Home, Briefcase, UserCheck, Building2, GitBranch, Network, MapPin,
+  RotateCcw
+} = __lucide;
+
+// ============================================================================
+// DATASETS
+// ============================================================================
+
+const DATASETS = {
+  'acs5': {
+    label: 'ACS 5-Year Estimates', short: 'ACS 5-Year',
+    description: 'Pooled data from a 5-year period. Most reliable for small areas.',
+    bestFor: 'Small geographies (block groups, tracts, small cities). Highest precision.',
+    tradeoff: 'Less current — represents an average over 5 years.',
+    geographies: ['us', 'region', 'division', 'state', 'county', 'tract', 'block group', 'place', 'cd', 'metropolitan statistical area/micropolitan statistical area'],
+    years: [2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024],
+    apiBase: 'acs/acs5',
+    hasUniverses: true,
+  },
+  'acs1': {
+    label: 'ACS 1-Year Estimates', short: 'ACS 1-Year',
+    description: 'Single-year data. Most current, but limited to larger areas.',
+    bestFor: 'Tracking year-over-year change in larger areas (65,000+ population).',
+    tradeoff: 'Only available for geographies with 65,000+ residents.',
+    geographies: ['us', 'region', 'division', 'state', 'county', 'place', 'cd', 'metropolitan statistical area/micropolitan statistical area'],
+    years: [2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2021, 2022, 2023, 2024],
+    apiBase: 'acs/acs1',
+    hasUniverses: true,
+  },
+  'dec_pl': {
+    label: 'Decennial Census — Redistricting (PL 94-171)', short: 'Decennial PL',
+    description: 'Complete count from the decennial census. Population, race, ethnicity, voting age.',
+    bestFor: 'Total counts at the smallest geographies — including blocks.',
+    tradeoff: 'Limited variables. Updated every 10 years only.',
+    geographies: ['us', 'region', 'division', 'state', 'county', 'tract', 'block group', 'block', 'place'],
+    years: [2010, 2020],
+    apiBase: 'dec/pl',
+    hasUniverses: false,
+  },
+  'dec_dhc': {
+    label: 'Decennial Census — Detailed Housing Characteristics', short: 'Decennial DHC',
+    description: 'Detailed demographic and housing data from the 2020 Census.',
+    bestFor: 'Comprehensive 2020 demographic snapshot at small geographies.',
+    tradeoff: 'Only 2020 vintage. No annual updates.',
+    geographies: ['us', 'region', 'division', 'state', 'county', 'tract', 'block group', 'place'],
+    years: [2020],
+    apiBase: 'dec/dhc',
+    hasUniverses: false,
+  },
+};
+
+// ============================================================================
+// UNIVERSES
+// ============================================================================
+
+const UNIVERSES = {
+  population: { label: 'Population', icon: Users, description: 'Per-person characteristics — demographics, education, mobility.', denominator: 'Total persons (or a defined age/citizenship subset)', examples: 'Age, race, ethnicity, education, poverty status, language' },
+  households: { label: 'Households', icon: Home, description: 'Occupied housing units as the unit of analysis — includes all types of households.', denominator: 'Total households (family + non-family)', examples: 'Household type, size, household income, tenure' },
+  families: { label: 'Families', icon: UserCheck, description: 'Households with two or more related people. A strict subset of households.', denominator: 'Family households only', examples: 'Family income, families with children, family poverty' },
+  housing_units: { label: 'Housing Units', icon: Building2, description: 'All housing units — including vacant. Different from households.', denominator: 'Total housing units (occupied + vacant)', examples: 'Home value, rent, structure type, year built, occupancy' },
+  workers: { label: 'Workers', icon: Briefcase, description: 'Employed persons, typically 16 years and over.', denominator: 'Workers 16+ (employed civilian labor force)', examples: 'Commute mode, travel time, occupation, industry' },
+};
+
+// ============================================================================
+// CORE TABLE CATALOG (abbreviated — same as v3)
+// ============================================================================
+
+const CORE_TABLES = [
+  { id: 'B01001', name: 'Sex by Age', universe: 'population', subset: 'Total', topic: 'Demographics', priority: 'core' },
+  { id: 'B01002', name: 'Median Age', universe: 'population', subset: 'Total', topic: 'Demographics', priority: 'core' },
+  { id: 'B01003', name: 'Total Population', universe: 'population', subset: 'Total', topic: 'Demographics', priority: 'core' },
+  { id: 'B02001', name: 'Race', universe: 'population', subset: 'Total', topic: 'Demographics', priority: 'core' },
+  { id: 'B03002', name: 'Hispanic or Latino Origin by Race', universe: 'population', subset: 'Total', topic: 'Demographics', priority: 'core' },
+  { id: 'B05002', name: 'Place of Birth', universe: 'population', subset: 'Total', topic: 'Demographics', priority: 'common' },
+  { id: 'B05003', name: 'Nativity and Citizenship Status', universe: 'population', subset: 'Total', topic: 'Demographics', priority: 'common' },
+  { id: 'B09001', name: 'Population Under 18', universe: 'population', subset: 'Under 18 years', topic: 'Demographics', priority: 'common' },
+  { id: 'B15003', name: 'Educational Attainment (Detailed)', universe: 'population', subset: '25+ years', topic: 'Education', priority: 'core' },
+  { id: 'B06009', name: 'Educational Attainment by Place of Birth', universe: 'population', subset: '25+ years', topic: 'Education', priority: 'common' },
+  { id: 'B14001', name: 'School Enrollment', universe: 'population', subset: '3+ years', topic: 'Education', priority: 'common' },
+  { id: 'B17001', name: 'Poverty Status in the Past 12 Months', universe: 'population', subset: 'Total (for whom poverty determined)', topic: 'Income & Poverty', priority: 'core' },
+  { id: 'B19201', name: 'Per Capita Income', universe: 'population', subset: 'Total', topic: 'Income & Poverty', priority: 'common' },
+  { id: 'B07001', name: 'Geographic Mobility in the Past Year', universe: 'population', subset: '1+ years', topic: 'Mobility', priority: 'common' },
+  { id: 'B16001', name: 'Language Spoken at Home', universe: 'population', subset: '5+ years', topic: 'Language', priority: 'common' },
+  { id: 'B18101', name: 'Disability Status by Sex by Age', universe: 'population', subset: 'Civilian noninstitutionalized', topic: 'Special Populations', priority: 'common' },
+  { id: 'B21001', name: 'Veteran Status', universe: 'population', subset: '18+ years', topic: 'Special Populations', priority: 'common' },
+  { id: 'B23025', name: 'Employment Status', universe: 'population', subset: '16+ years', topic: 'Employment', priority: 'core' },
+  { id: 'B11001', name: 'Household Type', universe: 'households', subset: 'Total', topic: 'Household Composition', priority: 'core' },
+  { id: 'B11003', name: 'Family Type by Presence of Children', universe: 'households', subset: 'With children', topic: 'Household Composition', priority: 'common' },
+  { id: 'B11016', name: 'Household Type by Household Size', universe: 'households', subset: 'Total', topic: 'Household Composition', priority: 'common' },
+  { id: 'B19001', name: 'Household Income Distribution', universe: 'households', subset: 'Total', topic: 'Income', priority: 'core' },
+  { id: 'B19013', name: 'Median Household Income', universe: 'households', subset: 'Total', topic: 'Income', priority: 'core' },
+  { id: 'B17021', name: 'Poverty Status of Households', universe: 'households', subset: 'Total', topic: 'Income & Poverty', priority: 'common' },
+  { id: 'B11005', name: 'Households with One or More People Under 18', universe: 'families', subset: 'With children under 18', topic: 'Household Composition', priority: 'common' },
+  { id: 'B19113', name: 'Median Family Income', universe: 'families', subset: 'Total', topic: 'Income', priority: 'core' },
+  { id: 'B19101', name: 'Family Income Distribution', universe: 'families', subset: 'Total', topic: 'Income', priority: 'common' },
+  { id: 'B17010', name: 'Poverty Status of Families', universe: 'families', subset: 'Total', topic: 'Income & Poverty', priority: 'common' },
+  { id: 'B17017', name: 'Poverty Status of Families by Household Type', universe: 'families', subset: 'Total', topic: 'Income & Poverty', priority: 'common' },
+  { id: 'B25001', name: 'Housing Units', universe: 'housing_units', subset: 'Total (occupied + vacant)', topic: 'Inventory', priority: 'core' },
+  { id: 'B25002', name: 'Occupancy Status', universe: 'housing_units', subset: 'Total', topic: 'Inventory', priority: 'core' },
+  { id: 'B25003', name: 'Tenure', universe: 'housing_units', subset: 'Occupied units', topic: 'Tenure', priority: 'core' },
+  { id: 'B25024', name: 'Units in Structure', universe: 'housing_units', subset: 'Total', topic: 'Structure', priority: 'common' },
+  { id: 'B25034', name: 'Year Structure Built', universe: 'housing_units', subset: 'Total', topic: 'Structure', priority: 'common' },
+  { id: 'B25064', name: 'Median Gross Rent', universe: 'housing_units', subset: 'Renter-occupied units', topic: 'Cost', priority: 'core' },
+  { id: 'B25077', name: 'Median Home Value', universe: 'housing_units', subset: 'Owner-occupied units', topic: 'Cost', priority: 'core' },
+  { id: 'B08301', name: 'Means of Transportation to Work', universe: 'workers', subset: 'Workers 16+', topic: 'Commute', priority: 'core' },
+  { id: 'B08303', name: 'Travel Time to Work', universe: 'workers', subset: 'Workers 16+', topic: 'Commute', priority: 'core' },
+  { id: 'B08006', name: 'Means of Transportation by Sex', universe: 'workers', subset: 'Workers 16+', topic: 'Commute', priority: 'common' },
+  { id: 'B08013', name: 'Aggregate Travel Time to Work', universe: 'workers', subset: 'Workers 16+', topic: 'Commute', priority: 'common' },
+  { id: 'B08119', name: 'Means of Transportation by Earnings', universe: 'workers', subset: 'Workers 16+', topic: 'Commute', priority: 'common' },
+  { id: 'B24010', name: 'Sex by Occupation', universe: 'workers', subset: 'Employed civilians 16+', topic: 'Occupation', priority: 'core' },
+  { id: 'B24030', name: 'Industry by Sex', universe: 'workers', subset: 'Employed civilians 16+', topic: 'Industry', priority: 'common' },
+];
+
+const CORE_TABLE_IDS = new Set(CORE_TABLES.map(t => t.id));
+
+const DECENNIAL_PRESETS = {
+  'dec_pl': [
+    { code: 'P1_001N', label: 'Total Population' },
+    { code: 'P1_003N', label: 'White Alone' },
+    { code: 'P1_004N', label: 'Black or African American Alone' },
+    { code: 'P1_006N', label: 'Asian Alone' },
+    { code: 'P2_002N', label: 'Hispanic or Latino' },
+    { code: 'P3_001N', label: 'Population 18 Years and Over' },
+    { code: 'H1_001N', label: 'Total Housing Units' },
+  ],
+  'dec_dhc': [
+    { code: 'P1_001N', label: 'Total Population' },
+    { code: 'P12_002N', label: 'Total Male Population' },
+    { code: 'P12_026N', label: 'Total Female Population' },
+    { code: 'H1_001N', label: 'Total Housing Units' },
+  ],
+};
+
+const STATES = [
+  { fips: '01', name: 'Alabama' }, { fips: '02', name: 'Alaska' }, { fips: '04', name: 'Arizona' },
+  { fips: '05', name: 'Arkansas' }, { fips: '06', name: 'California' }, { fips: '08', name: 'Colorado' },
+  { fips: '09', name: 'Connecticut' }, { fips: '10', name: 'Delaware' }, { fips: '11', name: 'District of Columbia' },
+  { fips: '12', name: 'Florida' }, { fips: '13', name: 'Georgia' }, { fips: '15', name: 'Hawaii' },
+  { fips: '16', name: 'Idaho' }, { fips: '17', name: 'Illinois' }, { fips: '18', name: 'Indiana' },
+  { fips: '19', name: 'Iowa' }, { fips: '20', name: 'Kansas' }, { fips: '21', name: 'Kentucky' },
+  { fips: '22', name: 'Louisiana' }, { fips: '23', name: 'Maine' }, { fips: '24', name: 'Maryland' },
+  { fips: '25', name: 'Massachusetts' }, { fips: '26', name: 'Michigan' }, { fips: '27', name: 'Minnesota' },
+  { fips: '28', name: 'Mississippi' }, { fips: '29', name: 'Missouri' }, { fips: '30', name: 'Montana' },
+  { fips: '31', name: 'Nebraska' }, { fips: '32', name: 'Nevada' }, { fips: '33', name: 'New Hampshire' },
+  { fips: '34', name: 'New Jersey' }, { fips: '35', name: 'New Mexico' }, { fips: '36', name: 'New York' },
+  { fips: '37', name: 'North Carolina' }, { fips: '38', name: 'North Dakota' }, { fips: '39', name: 'Ohio' },
+  { fips: '40', name: 'Oklahoma' }, { fips: '41', name: 'Oregon' }, { fips: '42', name: 'Pennsylvania' },
+  { fips: '44', name: 'Rhode Island' }, { fips: '45', name: 'South Carolina' }, { fips: '46', name: 'South Dakota' },
+  { fips: '47', name: 'Tennessee' }, { fips: '48', name: 'Texas' }, { fips: '49', name: 'Utah' },
+  { fips: '50', name: 'Vermont' }, { fips: '51', name: 'Virginia' }, { fips: '53', name: 'Washington' },
+  { fips: '54', name: 'West Virginia' }, { fips: '55', name: 'Wisconsin' }, { fips: '56', name: 'Wyoming' },
+];
+
+// ============================================================================
+// MSA → COUNTY FIPS LOOKUP (top 75 largest MSAs by population, 2020 OMB delineation)
+// Format: CBSA code → { name, counties: ["SSCCC", ...] where SS=state FIPS, CCC=county FIPS }
+// ============================================================================
+
+const MSA_COUNTIES = {
+  '35620': { name: 'New York-Newark-Jersey City, NY-NJ-PA', counties: ['36005','36047','36061','36081','36085','36059','36103','36119','36087','36071','34003','34013','34017','34019','34023','34025','34027','34029','34031','34035','34037','34039','42103'] },
+  '31080': { name: 'Los Angeles-Long Beach-Anaheim, CA', counties: ['06037','06059'] },
+  '16980': { name: 'Chicago-Naperville-Elgin, IL-IN-WI', counties: ['17031','17043','17063','17089','17093','17097','17111','17197','18089','18111','18127','55059'] },
+  '19100': { name: 'Dallas-Fort Worth-Arlington, TX', counties: ['48085','48113','48121','48139','48231','48251','48257','48367','48397','48439','48497'] },
+  '26420': { name: 'Houston-The Woodlands-Sugar Land, TX', counties: ['48015','48039','48071','48157','48167','48201','48291','48339','48473'] },
+  '47900': { name: 'Washington-Arlington-Alexandria, DC-VA-MD-WV', counties: ['11001','24009','24017','24021','24031','24033','51013','51043','51047','51059','51061','51107','51153','51157','51177','51179','51187','51510','51600','51610','51630','51683','51685','54037'] },
+  '33100': { name: 'Miami-Fort Lauderdale-Pompano Beach, FL', counties: ['12011','12086','12099'] },
+  '37980': { name: 'Philadelphia-Camden-Wilmington, PA-NJ-DE-MD', counties: ['10003','24015','34005','34007','34015','34033','42017','42029','42045','42091','42101'] },
+  '12060': { name: 'Atlanta-Sandy Springs-Alpharetta, GA', counties: ['13013','13015','13045','13057','13063','13067','13077','13085','13089','13097','13113','13117','13121','13135','13143','13149','13151','13159','13171','13199','13211','13217','13223','13227','13231','13247','13255','13297'] },
+  '14460': { name: 'Boston-Cambridge-Newton, MA-NH', counties: ['25009','25017','25021','25023','25025','25027','33015','33017'] },
+  '41860': { name: 'San Francisco-Oakland-Berkeley, CA', counties: ['06001','06013','06041','06075','06081'] },
+  '19820': { name: 'Detroit-Warren-Dearborn, MI', counties: ['26087','26093','26099','26125','26147','26163'] },
+  '38060': { name: 'Phoenix-Mesa-Chandler, AZ', counties: ['04013','04021'] },
+  '42660': { name: 'Seattle-Tacoma-Bellevue, WA', counties: ['53033','53053','53061'] },
+  '33460': { name: 'Minneapolis-St. Paul-Bloomington, MN-WI', counties: ['27003','27019','27025','27037','27053','27059','27079','27095','27123','27139','27141','27163','27171','55093','55109'] },
+  '41740': { name: 'San Diego-Chula Vista-Carlsbad, CA', counties: ['06073'] },
+  '45300': { name: 'Tampa-St. Petersburg-Clearwater, FL', counties: ['12057','12101','12103','12053'] },
+  '19740': { name: 'Denver-Aurora-Lakewood, CO', counties: ['08001','08005','08014','08019','08031','08035','08039','08047','08059','08093'] },
+  '41180': { name: 'St. Louis, MO-IL', counties: ['17005','17013','17027','17083','17117','17119','17133','17163','29071','29099','29113','29183','29189','29219','29510'] },
+  '12580': { name: 'Baltimore-Columbia-Towson, MD', counties: ['24003','24005','24013','24025','24027','24035','24510'] },
+  '16740': { name: 'Charlotte-Concord-Gastonia, NC-SC', counties: ['37025','37071','37097','37109','37119','37159','37179','45023','45057','45091'] },
+  '36740': { name: 'Orlando-Kissimmee-Sanford, FL', counties: ['12095','12097','12117','12069'] },
+  '41700': { name: 'San Antonio-New Braunfels, TX', counties: ['48013','48019','48029','48091','48187','48259','48325','48493'] },
+  '38900': { name: 'Portland-Vancouver-Hillsboro, OR-WA', counties: ['41005','41009','41051','41067','41071','53011','53059'] },
+  '40140': { name: 'Riverside-San Bernardino-Ontario, CA', counties: ['06065','06071'] },
+  '40900': { name: 'Sacramento-Roseville-Folsom, CA', counties: ['06017','06061','06067','06113'] },
+  '37100': { name: 'Oxnard-Thousand Oaks-Ventura, CA', counties: ['06111'] },
+  '29820': { name: 'Las Vegas-Henderson-Paradise, NV', counties: ['32003'] },
+  '17140': { name: 'Cincinnati, OH-KY-IN', counties: ['18029','18047','18115','18161','21015','21023','21037','21077','21081','21117','21191','39015','39017','39025','39061','39165'] },
+  '17460': { name: 'Cleveland-Elyria, OH', counties: ['39035','39055','39085','39093','39103'] },
+  '28140': { name: 'Kansas City, MO-KS', counties: ['20091','20103','20107','20121','20209','29013','29025','29037','29047','29049','29095','29107','29165','29177'] },
+  '18140': { name: 'Columbus, OH', counties: ['39041','39045','39049','39073','39083','39089','39097','39117','39127','39129','39159'] },
+  '26900': { name: 'Indianapolis-Carmel-Anderson, IN', counties: ['18011','18013','18057','18059','18063','18081','18095','18097','18109','18133','18145'] },
+  '12420': { name: 'Austin-Round Rock-Georgetown, TX', counties: ['48021','48055','48209','48453','48491'] },
+  '46060': { name: 'Tucson, AZ', counties: ['04019'] },
+  '39300': { name: 'Providence-Warwick, RI-MA', counties: ['25005','44001','44003','44005','44007','44009'] },
+  '32820': { name: 'Memphis, TN-MS-AR', counties: ['05035','28033','28093','28137','28143','47047','47157','47167'] },
+  '24860': { name: 'Greenville-Anderson, SC', counties: ['45007','45045','45059','45077','45083'] },
+  '27260': { name: 'Jacksonville, FL', counties: ['12003','12019','12031','12089','12109'] },
+  '36420': { name: 'Oklahoma City, OK', counties: ['40017','40027','40051','40081','40083','40087','40109'] },
+  '39580': { name: 'Raleigh-Cary, NC', counties: ['37069','37101','37183'] },
+  '41940': { name: 'San Jose-Sunnyvale-Santa Clara, CA', counties: ['06069','06085'] },
+  '34980': { name: 'Nashville-Davidson–Murfreesboro–Franklin, TN', counties: ['47015','47021','47037','47043','47081','47111','47117','47119','47147','47149','47159','47165','47169','47187','47189'] },
+  '36540': { name: 'Omaha-Council Bluffs, NE-IA', counties: ['19085','19129','19155','31025','31055','31153','31155','31177'] },
+  '35380': { name: 'New Orleans-Metairie, LA', counties: ['22051','22071','22075','22087','22089','22093','22095','22103'] },
+  '45060': { name: 'Syracuse, NY', counties: ['36053','36067','36075'] },
+  '28660': { name: 'Killeen-Temple, TX', counties: ['48027','48099','48281'] },
+  '49340': { name: 'Worcester, MA-CT', counties: ['09015','25027'] },
+  '13820': { name: 'Birmingham-Hoover, AL', counties: ['01007','01009','01073','01115','01117','01127'] },
+  '40060': { name: 'Richmond, VA', counties: ['51007','51033','51036','51041','51053','51075','51085','51087','51097','51101','51127','51145','51149','51183','51570','51670','51730','51760'] },
+  '25540': { name: 'Hartford-East Hartford-Middletown, CT', counties: ['09003','09007','09013'] },
+  '15380': { name: 'Buffalo-Cheektowaga, NY', counties: ['36029','36063'] },
+  '19380': { name: 'Dayton-Kettering, OH', counties: ['39057','39109','39113','39135'] },
+  '44700': { name: 'Stockton, CA', counties: ['06077'] },
+  '12260': { name: 'Augusta-Richmond County, GA-SC', counties: ['13073','13181','13189','13245','13073','45003','45037'] },
+  '32580': { name: 'McAllen-Edinburg-Mission, TX', counties: ['48215'] },
+  '10420': { name: 'Akron, OH', counties: ['39133','39153'] },
+  '46520': { name: 'Urban Honolulu, HI', counties: ['15003'] },
+  '42540': { name: 'Scranton--Wilkes-Barre, PA', counties: ['42069','42079','42131'] },
+  '40380': { name: 'Rochester, NY', counties: ['36051','36055','36069','36073','36117','36123'] },
+  '47260': { name: 'Virginia Beach-Norfolk-Newport News, VA-NC', counties: ['37053','37143','51073','51093','51095','51115','51175','51199','51550','51620','51650','51700','51710','51735','51740','51800','51810','51830'] },
+  '28940': { name: 'Knoxville, TN', counties: ['47001','47009','47011','47013','47057','47093','47105','47129','47145','47155','47173'] },
+  '22180': { name: 'Fayetteville, NC', counties: ['37051','37093'] },
+  '27140': { name: 'Jackson, MS', counties: ['28029','28049','28051','28059','28089','28121','28127','28163'] },
+  '25060': { name: 'Gulfport-Biloxi, MS', counties: ['28045','28047','28109'] },
+  '32900': { name: 'Merced, CA', counties: ['06047'] },
+  '41500': { name: 'Salinas, CA', counties: ['06053'] },
+  '46140': { name: 'Tulsa, OK', counties: ['40037','40111','40113','40117','40121','40131','40143'] },
+  '26380': { name: 'Houma-Thibodaux, LA', counties: ['22057','22109'] },
+  '29460': { name: 'Lakeland-Winter Haven, FL', counties: ['12105'] },
+  '49620': { name: 'York-Hanover, PA', counties: ['42133'] },
+  '31140': { name: 'Louisville/Jefferson County, KY-IN', counties: ['18019','18043','18061','18143','18175','21029','21103','21111','21185','21211','21215','21223'] },
+  '34820': { name: 'Myrtle Beach-Conway-North Myrtle Beach, SC-NC', counties: ['37019','45051'] },
+  '33340': { name: 'Milwaukee-Waukesha, WI', counties: ['55079','55089','55131','55133'] },
+  '18880': { name: 'Crestview-Fort Walton Beach-Destin, FL', counties: ['12091','12131'] },
+  '39900': { name: 'Reno, NV', counties: ['32031','32029'] },
+  '35840': { name: 'North Port-Sarasota-Bradenton, FL', counties: ['12081','12115'] },
+};
+
+// ============================================================================
+// NESTING GEOGRAPHIES (block → block group → tract → county → state → nation)
+// NON-NESTING: congressional districts, MSAs, places (these overlap/cross nesting boundaries)
+// ============================================================================
+
+const GEOGRAPHIES = {
+  // --- Nesting ---
+  'block': { label: 'Census Block', group: 'nesting', description: 'Smallest geographic unit. Typically a city block.', population: '~50–200 people', vintages: '2010, 2020', note: 'Decennial only. Nests within block group → tract → county → state.', tigerKey: 'TABBLOCK', tigerScope: 'state' },
+  'block group': { label: 'Block Group', group: 'nesting', description: 'Cluster of blocks. Smallest unit for ACS data.', population: '~600–3,000 people', vintages: '2010, 2020', note: 'Smallest geography ACS supports (5-year only). Nests within tract.', tigerKey: 'BG', tigerScope: 'state' },
+  'tract': { label: 'Census Tract', group: 'nesting', description: 'Subdivision of a county designed to be relatively homogeneous.', population: '~1,200–8,000 people', vintages: '2010, 2020', note: 'Nests within county. Workhorse for neighborhood-level analysis.', tigerKey: 'TRACT', tigerScope: 'state' },
+  'county': { label: 'County', group: 'nesting', description: 'County or county-equivalent.', population: 'Highly variable', vintages: 'Updated annually', note: 'Nests within state. Standard for regional analysis.', tigerKey: 'COUNTY', tigerScope: 'national' },
+  'state': { label: 'State', group: 'nesting', description: 'U.S. states, DC, and Puerto Rico.', population: 'Highly variable', vintages: 'Stable', note: 'Highest sub-national nesting unit.', tigerKey: 'STATE', tigerScope: 'national' },
+
+  // --- Non-nesting ---
+  'place': { label: 'Place', group: 'nonnesting', description: 'Cities, towns, CDPs (Census Designated Places). Can cross county lines.', population: 'Highly variable', vintages: 'Updated annually', note: 'Use ACS 1-Year only for places ≥65,000.', tigerKey: 'PLACE', tigerScope: 'state' },
+  'cd': { label: 'Congressional District', group: 'nonnesting', description: 'U.S. House districts. Redrawn after each decennial reapportionment.', population: '~760,000 people', vintages: 'Updated each Congress', note: 'Cuts across counties and places.', tigerKey: 'CD', tigerScope: 'national' },
+  'metropolitan statistical area/micropolitan statistical area': { label: 'Metro/Micropolitan Area', group: 'nonnesting', description: 'CBSAs — a set of counties forming a regional economy.', population: 'MSA: ≥50,000 core; µSA: 10,000–50,000', vintages: 'Updated annually', note: 'Often crosses state lines. Best for cross-jurisdictional regional analysis.', tigerKey: 'CBSA', tigerScope: 'national' },
+};
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+function recommendDataset({ recency, geoSize, needsBlocks, focus }) {
+  if (needsBlocks) return 'dec_pl';
+  if (focus === 'race_ethnicity_total') return 'dec_pl';
+  if (recency === 'most_current' && geoSize === 'large') return 'acs1';
+  return 'acs5';
+}
+
+function buildShapefileUrl(geo, year, stateFips) {
+  const meta = GEOGRAPHIES[geo];
+  if (!meta?.tigerKey) return null;
+  const tigerYear = year >= 2020 ? Math.min(year, 2024) : 2019;
+  const key = meta.tigerKey;
+  const keyLower = key.toLowerCase();
+  if (meta.tigerScope === 'national') {
+    return { url: `https://www2.census.gov/geo/tiger/TIGER${tigerYear}/${key}/tl_${tigerYear}_us_${keyLower}.zip`, scope: 'National', tigerYear };
+  }
+  if (!stateFips) return null;
+  return { url: `https://www2.census.gov/geo/tiger/TIGER${tigerYear}/${key}/tl_${tigerYear}_${stateFips}_${keyLower}.zip`, scope: STATES.find(s => s.fips === stateFips)?.name || 'State', tigerYear };
+}
+
+// Build a single API URL given a filter scope
+function buildApiUrl({ dataset, year, geo, varCodes, filterScope, apiKey }) {
+  const ds = DATASETS[dataset];
+  const varList = ['NAME', ...varCodes].join(',');
+  let url = `https://api.census.gov/data/${year}/${ds.apiBase}?get=${varList}&for=${encodeURIComponent(geo)}:*`;
+
+  // filterScope: { type: 'none' | 'state' | 'county' | 'msa', stateFips, countyFips }
+  // The 'in=' clause is what nests the query.
+  if (filterScope?.type === 'state') {
+    url += `&in=state:${filterScope.stateFips}`;
+  } else if (filterScope?.type === 'county') {
+    // single county
+    url += `&in=state:${filterScope.stateFips}%20county:${filterScope.countyFips}`;
+  }
+  if (apiKey) {
+    url += `&key=${encodeURIComponent(apiKey)}`;
+  }
+  return url;
+}
+
+// Determine whether geo requires a state/county filter (Census API nesting rules)
+function getRequiredScope(geo) {
+  // Returns 'state' (need state), 'state+county' (need both), or 'none'
+  if (!geo) return 'none';
+  if (['us', 'region', 'division', 'state'].includes(geo)) return 'none';
+  if (geo === 'block group' || geo === 'block') return 'state+county'; // API requires both
+  // tract, place, county: need at least state
+  if (['tract', 'county', 'place'].includes(geo)) return 'state';
+  // CD, CBSA: no state required (can query nationally)
+  return 'none';
+}
+
+function toCSV(rows) {
+  return rows.map(row =>
+    row.map(cell => {
+      const s = String(cell ?? '');
+      if (s.includes(',') || s.includes('"') || s.includes('\n')) return `"${s.replace(/"/g, '""')}"`;
+      return s;
+    }).join(',')
+  ).join('\n');
+}
+
+function downloadFile(filename, content) {
+  const blob = new Blob([content], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a); URL.revokeObjectURL(url);
+}
+
+function extractTableId(code) {
+  const m = code.match(/^([A-Z]+\d+)_/);
+  return m ? m[1] : null;
+}
+
+function inferUniverseFromConcept(concept = '') {
+  const c = concept.toLowerCase();
+  if (c.includes('housing unit')) return 'housing_units';
+  if (c.includes('families')) return 'families';
+  if (c.includes('households')) return 'households';
+  if (c.includes('workers') || c.includes('employed')) return 'workers';
+  return 'population';
+}
+
+// Sleep helper for backoff
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// Fetch one county with retries on transient failures (429 rate limit, 5xx, network errors)
+async function fetchOneCountyWithRetry({ dataset, year, geo, varCodes, ref, apiKey, maxAttempts = 3 }) {
+  // Build URL — special case: if geography IS "county", we can't nest counties inside counties.
+  // Query the county directly by its FIPS instead.
+  let url;
+  if (geo === 'county') {
+    const ds = DATASETS[dataset];
+    const varList = ['NAME', ...varCodes].join(',');
+    url = `https://api.census.gov/data/${year}/${ds.apiBase}?get=${varList}&for=county:${ref.countyFips}&in=state:${ref.stateFips}`;
+    if (apiKey) url += `&key=${encodeURIComponent(apiKey)}`;
+  } else {
+    url = buildApiUrl({
+      dataset, year, geo, varCodes, apiKey,
+      filterScope: { type: 'county', stateFips: ref.stateFips, countyFips: ref.countyFips },
+    });
+  }
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        return { ok: true, data, ref };
+      }
+      // Retry 429 (rate limit) and 5xx (server errors). Bail on 4xx client errors.
+      if (res.status === 429 || res.status >= 500) {
+        lastError = `HTTP ${res.status}`;
+        if (attempt < maxAttempts) {
+          await sleep(400 * attempt); // linear backoff: 400ms, 800ms, 1200ms
+          continue;
+        }
+      } else {
+        // 4xx other than 429 — won't succeed on retry
+        const body = await res.text();
+        return { ok: false, ref, error: `HTTP ${res.status}: ${body.slice(0, 160)}` };
+      }
+    } catch (e) {
+      lastError = e.message || 'Network error';
+      if (attempt < maxAttempts) {
+        await sleep(400 * attempt);
+        continue;
+      }
+    }
+  }
+  return { ok: false, ref, error: lastError || 'Unknown error' };
+}
+
+// Fan-out API: fetches multiple counties sequentially (to avoid rate limits)
+// and aggregates results. Reports per-county success/failure.
+async function fetchFromMultipleCounties({ dataset, year, geo, varCodes, countyRefs, apiKey, onProgress }) {
+  const succeeded = [];
+  const failed = [];
+
+  for (let i = 0; i < countyRefs.length; i++) {
+    const ref = countyRefs[i];
+    onProgress?.(i + 1, countyRefs.length, ref);
+    const result = await fetchOneCountyWithRetry({ dataset, year, geo, varCodes, ref, apiKey });
+    if (result.ok) {
+      succeeded.push(result);
+    } else {
+      failed.push(result);
+    }
+    // Small delay between requests to avoid hitting the rate limit
+    if (i < countyRefs.length - 1) await sleep(80);
+  }
+
+  // Aggregate
+  let headers = null;
+  const dataRows = [];
+  for (const { data } of succeeded) {
+    if (!data || data.length < 2) continue;
+    if (!headers) headers = data[0];
+    for (let i = 1; i < data.length; i++) dataRows.push(data[i]);
+  }
+
+  if (!headers) {
+    const msg = failed.length
+      ? `All ${failed.length} county requests failed. First error: ${failed[0].error}`
+      : 'No data returned from any of the selected counties.';
+    throw new Error(msg);
+  }
+
+  return {
+    rows: [headers, ...dataRows],
+    succeededCount: succeeded.length,
+    failedCount: failed.length,
+    failures: failed.map(f => ({ name: f.ref.name, error: f.error })),
+  };
+}
+
+// ============================================================================
+// MAIN COMPONENT
+// ============================================================================
+
+function CensusExplorer() {
+  const [recommendMode, setRecommendMode] = useState(false);
+  const [recAnswers, setRecAnswers] = useState({});
+  const [selectedDataset, setSelectedDataset] = useState(null);
+  const [selectedYear, setSelectedYear] = useState(null);
+  const [selectedGeo, setSelectedGeo] = useState(null);
+
+  // Filter scope: how to narrow which geographies are returned
+  // Shape: { type: 'state' | 'counties' | 'msa' | 'none', stateFips, countyRefs: [{stateFips, countyFips, name}], msaCode }
+  const [filterScope, setFilterScope] = useState({ type: 'none' });
+
+  const [selectedUniverse, setSelectedUniverse] = useState(null);
+  const [selectedTable, setSelectedTable] = useState(null);
+  const [selectedVars, setSelectedVars] = useState([]);
+
+  const [previewData, setPreviewData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [loadingMsg, setLoadingMsg] = useState('');
+  const [error, setError] = useState(null);
+  const [partialFailures, setPartialFailures] = useState(null); // { failedCount, failures: [{name, error}] }
+
+  // Optional Census API key — raises the 500/day unauthenticated rate limit
+  const [apiKey, setApiKeyState] = useState(() => {
+    // Try to rehydrate from localStorage; fail silently if unavailable (artifacts don't allow it)
+    try { return window.localStorage.getItem('census-atlas-api-key') || ''; } catch { return ''; }
+  });
+  const [showApiKeyInput, setShowApiKeyInput] = useState(false);
+  function setApiKey(v) {
+    setApiKeyState(v);
+    try {
+      if (v) window.localStorage.setItem('census-atlas-api-key', v);
+      else window.localStorage.removeItem('census-atlas-api-key');
+    } catch { /* localStorage unavailable; non-fatal */ }
+  }
+
+  const [varCatalog, setVarCatalog] = useState(null);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState(null);
+
+  // Tracks which steps the user has manually expanded (overriding auto-collapse).
+  // A Set of step numbers (1, 2, 3, 4).
+  const [manuallyExpanded, setManuallyExpanded] = useState(() => new Set());
+  function toggleExpand(step) {
+    setManuallyExpanded(prev => {
+      const next = new Set(prev);
+      if (next.has(step)) next.delete(step);
+      else next.add(step);
+      return next;
+    });
+  }
+  function clearManualExpand(step) {
+    setManuallyExpanded(prev => {
+      if (!prev.has(step)) return prev;
+      const next = new Set(prev);
+      next.delete(step);
+      return next;
+    });
+  }
+
+  // Refs for scroll-to-section on step transitions
+  const step2Ref = useRef(null);
+  const step3Ref = useRef(null);
+  const step4Ref = useRef(null);
+
+  // Custom smooth-scroll with a slower, gentler ease than the browser default.
+  // The browser's `scrollIntoView({behavior: 'smooth'})` is too snappy for this UX.
+  function animatedScrollTo(targetY, duration = 900) {
+    const startY = window.scrollY;
+    const distance = targetY - startY;
+    if (Math.abs(distance) < 4) return;
+    const startTime = performance.now();
+    // Ease-in-out cubic — gentle acceleration and deceleration
+    const ease = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    function step(now) {
+      const elapsed = now - startTime;
+      const t = Math.min(elapsed / duration, 1);
+      window.scrollTo(0, startY + distance * ease(t));
+      if (t < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  }
+
+  function scrollToRef(ref) {
+    if (!ref?.current) return;
+    // Wait for the collapse animation to start before scrolling, so the eye
+    // follows the motion of step N collapsing → step N+1 settling into view.
+    setTimeout(() => {
+      if (!ref.current) return;
+      const rect = ref.current.getBoundingClientRect();
+      // Account for the sticky header (~80px tall without the progress bar)
+      const headerOffset = 80;
+      const targetY = window.scrollY + rect.top - headerOffset;
+      animatedScrollTo(targetY, 1300);
+    }, 280);
+  }
+
+  const [showVarSearch, setShowVarSearch] = useState(false);
+  const [varSearchQuery, setVarSearchQuery] = useState('');
+  const [showExtendedTables, setShowExtendedTables] = useState(false);
+
+  const dataset = selectedDataset ? DATASETS[selectedDataset] : null;
+  const availableGeos = dataset ? dataset.geographies.filter(g => GEOGRAPHIES[g]) : [];
+  const nestingGeos = availableGeos.filter(g => GEOGRAPHIES[g].group === 'nesting');
+  const nonNestingGeos = availableGeos.filter(g => GEOGRAPHIES[g].group === 'nonnesting');
+
+  const requiredScope = getRequiredScope(selectedGeo);
+  const isFilterable = requiredScope !== 'none'; // can this geo be filtered at all?
+
+  const canPreview = useMemo(() => {
+    if (!selectedDataset || !selectedYear || !selectedGeo || selectedVars.length === 0) return false;
+    if (requiredScope === 'none') return true;
+    // need a valid filterScope (canPreview is independent of `confirmed`;
+    // that only gates auto-collapse of step 3)
+    if (filterScope.type === 'state' && filterScope.stateFips) return true;
+    if (filterScope.type === 'counties' && filterScope.countyRefs?.length > 0) return true;
+    if (filterScope.type === 'msa' && filterScope.msaCodes?.length > 0) return true;
+    return false;
+  }, [selectedDataset, selectedYear, selectedGeo, selectedVars, filterScope, requiredScope]);
+
+  // Reset cascades
+  useEffect(() => {
+    setSelectedYear(null); setSelectedGeo(null);
+    setFilterScope({ type: 'none' });
+    setSelectedUniverse(null); setSelectedTable(null); setSelectedVars([]);
+    setPreviewData(null); setVarCatalog(null); setVarSearchQuery('');
+    setShowExtendedTables(false);
+    if (selectedDataset) {
+      clearManualExpand(1);
+      scrollToRef(step2Ref);
+    }
+  }, [selectedDataset]);
+
+  useEffect(() => {
+    setSelectedGeo(null); setFilterScope({ type: 'none' });
+    setSelectedUniverse(null); setSelectedTable(null); setSelectedVars([]);
+    setPreviewData(null); setVarCatalog(null); setVarSearchQuery('');
+    setShowExtendedTables(false);
+    if (selectedYear) {
+      clearManualExpand(2);
+      scrollToRef(step3Ref);
+    }
+  }, [selectedYear]);
+
+  useEffect(() => {
+    setFilterScope({ type: 'none' });
+    setSelectedUniverse(null); setSelectedTable(null); setSelectedVars([]);
+    setPreviewData(null);
+    // Don't auto-scroll here — user may still need to set filter scope.
+    // The scroll-to-step-4 happens in a separate effect once scope is satisfied.
+  }, [selectedGeo]);
+
+  // Scroll to step 4 once geography + (any required) filter scope is satisfied.
+  // For multi-select county/MSA modes, requires an explicit "confirmed" flag
+  // so the step doesn't auto-collapse after the first selection.
+  const stepThreeComplete = useMemo(() => {
+    if (!selectedGeo) return false;
+    if (requiredScope === 'none') return true;
+    if (filterScope.type === 'state' && filterScope.stateFips) return true;
+    if (filterScope.type === 'counties' && filterScope.countyRefs?.length > 0) {
+      // Single-county mode auto-completes; multi requires user to confirm.
+      return filterScope.multi ? !!filterScope.confirmed : true;
+    }
+    if (filterScope.type === 'msa' && filterScope.msaCodes?.length > 0) {
+      return filterScope.multi ? !!filterScope.confirmed : true;
+    }
+    return false;
+  }, [selectedGeo, filterScope, requiredScope]);
+
+  const lastStepThreeComplete = useRef(false);
+  useEffect(() => {
+    if (stepThreeComplete && !lastStepThreeComplete.current) {
+      clearManualExpand(3);
+      scrollToRef(step4Ref);
+    }
+    lastStepThreeComplete.current = stepThreeComplete;
+  }, [stepThreeComplete]);
+
+  useEffect(() => {
+    if (selectedUniverse && !varCatalog && !catalogLoading && dataset?.hasUniverses) {
+      loadVarCatalog();
+    }
+  }, [selectedUniverse]);
+
+  async function loadVarCatalog() {
+    if (varCatalog || catalogLoading || !selectedDataset || !selectedYear) return;
+    setCatalogLoading(true); setCatalogError(null);
+    try {
+      const url = `https://api.census.gov/data/${selectedYear}/${dataset.apiBase}/variables.json`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Catalog fetch failed: ${res.status}`);
+      const json = await res.json();
+      const flat = Object.entries(json.variables || {})
+        .filter(([code, v]) =>
+          (code.endsWith('E') || code.endsWith('N')) &&
+          !['NAME', 'GEO_ID', 'state', 'county', 'tract', 'place', 'block group', 'block'].includes(code) &&
+          v.label && v.concept
+        )
+        .map(([code, v]) => ({
+          code,
+          label: v.label.replace(/^Estimate!!/, '').replace(/!!/g, ' › '),
+          concept: v.concept,
+          group: v.group || extractTableId(code),
+          tableId: extractTableId(code),
+        }));
+      setVarCatalog(flat);
+    } catch (e) {
+      setCatalogError(e.message);
+    } finally {
+      setCatalogLoading(false);
+    }
+  }
+
+  // Hard reset — wipe everything back to step 1. Preserves API key.
+  function resetAll() {
+    setSelectedDataset(null);
+    setSelectedYear(null);
+    setSelectedGeo(null);
+    setFilterScope({ type: 'none' });
+    setSelectedUniverse(null);
+    setSelectedTable(null);
+    setSelectedVars([]);
+    setPreviewData(null);
+    setError(null);
+    setPartialFailures(null);
+    setVarCatalog(null);
+    setVarSearchQuery('');
+    setShowExtendedTables(false);
+    setRecommendMode(false);
+    setRecAnswers({});
+  }
+
+  // Reset starting from a specific step — everything downstream gets cleared
+  function resetFromStep(step) {
+    if (step <= 1) setSelectedDataset(null);
+    if (step <= 2) setSelectedYear(null);
+    if (step <= 3) { setSelectedGeo(null); setFilterScope({ type: 'none' }); }
+    if (step <= 4) {
+      setSelectedUniverse(null);
+      setSelectedTable(null);
+      setSelectedVars([]);
+    }
+    setPreviewData(null);
+    setError(null);
+    setPartialFailures(null);
+  }
+
+  async function fetchPreview() {
+    if (!canPreview) return;
+    setLoading(true); setError(null); setPreviewData(null); setPartialFailures(null);
+    setLoadingMsg('Fetching from Census API…');
+
+    try {
+      const varCodes = selectedVars.map(v => v.code);
+
+      // Route based on filter type
+      if (filterScope.type === 'none' || filterScope.type === 'state') {
+        // Single API call
+        const url = buildApiUrl({
+          dataset: selectedDataset, year: selectedYear, geo: selectedGeo, varCodes, apiKey,
+          filterScope: filterScope.type === 'state' ? { type: 'state', stateFips: filterScope.stateFips } : undefined,
+        });
+        const res = await fetch(url);
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`Census API returned ${res.status}. ${text.slice(0, 200)}`);
+        }
+        const data = await res.json();
+        setPreviewData(data);
+      } else if (filterScope.type === 'counties') {
+        // Multi-county fan-out (sequential, retried)
+        const result = await fetchFromMultipleCounties({
+          dataset: selectedDataset, year: selectedYear, geo: selectedGeo, varCodes, apiKey,
+          countyRefs: filterScope.countyRefs,
+          onProgress: (i, total, ref) => {
+            setLoadingMsg(`Fetching county ${i} of ${total}: ${ref.name}…`);
+          },
+        });
+        setPreviewData(result.rows);
+        if (result.failedCount > 0) {
+          setPartialFailures({ failedCount: result.failedCount, failures: result.failures });
+        }
+      } else if (filterScope.type === 'msa') {
+        const msaCodes = filterScope.msaCodes || (filterScope.msaCode ? [filterScope.msaCode] : []);
+        if (msaCodes.length === 0) throw new Error('No MSA selected.');
+
+        // Aggregate counties across all selected MSAs (deduplicating)
+        const seen = new Set();
+        const countyRefs = [];
+        for (const code of msaCodes) {
+          const msa = MSA_COUNTIES[code];
+          if (!msa) continue;
+          for (const fullFips of msa.counties) {
+            if (seen.has(fullFips)) continue;
+            seen.add(fullFips);
+            countyRefs.push({
+              stateFips: fullFips.slice(0, 2),
+              countyFips: fullFips.slice(2),
+              name: `County ${fullFips}`,
+            });
+          }
+        }
+        if (countyRefs.length === 0) throw new Error('No counties found for the selected MSAs.');
+
+        const msaLabel = msaCodes.length === 1
+          ? (MSA_COUNTIES[msaCodes[0]]?.name.split(',')[0] || 'MSA')
+          : `${msaCodes.length} MSAs`;
+        const result = await fetchFromMultipleCounties({
+          dataset: selectedDataset, year: selectedYear, geo: selectedGeo, varCodes, countyRefs, apiKey,
+          onProgress: (i, total, ref) => {
+            setLoadingMsg(`Fetching county ${i} of ${total} in ${msaLabel}…`);
+          },
+        });
+        setPreviewData(result.rows);
+        if (result.failedCount > 0) {
+          setPartialFailures({ failedCount: result.failedCount, failures: result.failures });
+        }
+      }
+    } catch (e) {
+      setError(e.message || 'Failed to fetch data.');
+    } finally {
+      setLoading(false); setLoadingMsg('');
+    }
+  }
+
+  function applyRecommendation() {
+    setSelectedDataset(recommendDataset(recAnswers));
+    setRecommendMode(false);
+  }
+
+  function toggleVar(v) {
+    setSelectedVars(prev => {
+      const exists = prev.find(x => x.code === v.code);
+      if (exists) return prev.filter(x => x.code !== v.code);
+      return [...prev, v];
+    });
+  }
+
+  const tablesForUniverse = useMemo(() => {
+    if (!selectedUniverse) return [];
+    const core = CORE_TABLES.filter(t => t.universe === selectedUniverse);
+    if (varCatalog && showExtendedTables) {
+      const discoveredIds = new Set();
+      varCatalog.forEach(v => {
+        if (!v.tableId || CORE_TABLE_IDS.has(v.tableId) || discoveredIds.has(v.tableId)) return;
+        const inferredUniverse = inferUniverseFromConcept(v.concept);
+        if (inferredUniverse === selectedUniverse) discoveredIds.add(v.tableId);
+      });
+      const extras = [];
+      discoveredIds.forEach(tid => {
+        const firstVar = varCatalog.find(v => v.tableId === tid);
+        if (firstVar) {
+          extras.push({ id: tid, name: firstVar.concept.replace(/^[A-Z]+\d+:\s*/, ''), universe: selectedUniverse, subset: '—', topic: 'Extended', priority: 'extended' });
+        }
+      });
+      return [...core, ...extras.sort((a, b) => a.id.localeCompare(b.id))];
+    }
+    return core;
+  }, [selectedUniverse, varCatalog, showExtendedTables]);
+
+  const variablesInTable = useMemo(() => {
+    if (!selectedTable || !varCatalog) return [];
+    return varCatalog.filter(v => v.tableId === selectedTable.id).sort((a, b) => a.code.localeCompare(b.code));
+  }, [selectedTable, varCatalog]);
+
+  const tablesByTopic = useMemo(() => {
+    const groups = {};
+    tablesForUniverse.forEach(t => {
+      if (!groups[t.topic]) groups[t.topic] = [];
+      groups[t.topic].push(t);
+    });
+    return groups;
+  }, [tablesForUniverse]);
+
+  const filteredCatalog = useMemo(() => {
+    if (!varCatalog || !varSearchQuery.trim()) return [];
+    const q = varSearchQuery.toLowerCase().trim();
+    const tokens = q.split(/\s+/);
+    return varCatalog
+      .filter(v => {
+        const haystack = `${v.code} ${v.label} ${v.concept}`.toLowerCase();
+        return tokens.every(t => haystack.includes(t));
+      })
+      .slice(0, 100);
+  }, [varCatalog, varSearchQuery]);
+
+  const varLabelMap = useMemo(() => {
+    const m = {};
+    selectedVars.forEach(v => { m[v.code] = v.label; });
+    return m;
+  }, [selectedVars]);
+
+  // For shapefile: pick a representative state if filter is multi-county within one state
+  const shapefileStateFips = useMemo(() => {
+    if (filterScope.type === 'state') return filterScope.stateFips;
+    if (filterScope.type === 'counties' && filterScope.countyRefs?.length > 0) {
+      const firstState = filterScope.countyRefs[0].stateFips;
+      const allSame = filterScope.countyRefs.every(c => c.stateFips === firstState);
+      return allSame ? firstState : null;
+    }
+    if (filterScope.type === 'msa') {
+      const codes = filterScope.msaCodes || (filterScope.msaCode ? [filterScope.msaCode] : []);
+      if (codes.length === 0) return null;
+      // Collect all counties across all selected MSAs and check state consistency
+      const allFips = [];
+      for (const code of codes) {
+        const msa = MSA_COUNTIES[code];
+        if (msa) allFips.push(...msa.counties);
+      }
+      if (allFips.length === 0) return null;
+      const firstState = allFips[0].slice(0, 2);
+      const allSame = allFips.every(c => c.slice(0, 2) === firstState);
+      return allSame ? firstState : null;
+    }
+    return null;
+  }, [filterScope]);
+
+  const shapefile = previewData ? buildShapefileUrl(selectedGeo, selectedYear, shapefileStateFips) : null;
+  const shapefileMultiState = previewData && filterScope.type !== 'state' && filterScope.type !== 'none' && !shapefileStateFips;
+
+  const universesInUse = useMemo(() => {
+    const us = new Set();
+    selectedVars.forEach(v => { if (v.universe) us.add(v.universe); });
+    return [...us];
+  }, [selectedVars]);
+
+  return (
+    <div className="min-h-screen bg-stone-50 text-stone-900" style={{ fontFamily: 'Söhne, "Helvetica Neue", Helvetica, Arial, sans-serif' }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500;9..144,600&family=JetBrains+Mono:wght@400;500&display=swap');
+        .serif { font-family: 'Fraunces', Georgia, serif; font-optical-sizing: auto; }
+        .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+        .hairline { border-color: #d6d3d1; }
+        .hairline-strong { border-color: #1c1917; }
+        .lift { transition: all 180ms cubic-bezier(0.4, 0, 0.2, 1); }
+        .lift:hover { transform: translateY(-1px); }
+        .fadein { animation: fadein 320ms ease-out; }
+        @keyframes fadein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+        /* Bouncy entrance — used when a step first becomes active */
+        .pop-in { animation: pop-in 1100ms cubic-bezier(0.34, 1.56, 0.64, 1); }
+        @keyframes pop-in {
+          0%   { opacity: 0; transform: translateY(22px) scale(0.96); }
+          35%  { opacity: 1; }
+          65%  { transform: translateY(-5px) scale(1.012); }
+          82%  { transform: translateY(2px) scale(0.997); }
+          100% { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        /* Collapse/expand transition — animate grid-template-rows explicitly
+           since Tailwind transition-all does not always cover it */
+        .collapse-anim {
+          transition-property: grid-template-rows, opacity, margin;
+          transition-duration: 1300ms;
+          transition-timing-function: cubic-bezier(0.34, 1.45, 0.5, 1);
+        }
+        .expanded-grid { grid-template-rows: 1fr; }
+        .collapsed-grid { grid-template-rows: 0fr; }
+        .step-line { background: repeating-linear-gradient(to right, #1c1917 0 4px, transparent 4px 8px); }
+        .scrollbar-thin::-webkit-scrollbar { width: 6px; }
+        .scrollbar-thin::-webkit-scrollbar-thumb { background: #d6d3d1; border-radius: 3px; }
+        .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+        @media (prefers-reduced-motion: reduce) {
+          .pop-in, .fadein { animation: none; }
+        }
+      `}</style>
+
+      <header className="border-b hairline-strong bg-stone-50 sticky top-0 z-10">
+        <div className="max-w-6xl mx-auto px-8 py-5 flex items-baseline justify-between">
+          <div className="flex items-baseline gap-4">
+            <h1 className="serif text-2xl font-medium tracking-tight">Census Atlas</h1>
+            <span className="mono text-xs text-stone-500 uppercase tracking-widest">A quick census query tool</span>
+          </div>
+          <div className="flex items-center gap-3">
+            {(selectedDataset || selectedYear || selectedGeo || selectedVars.length > 0) && (
+              <button
+                onClick={() => {
+                  if (previewData || selectedVars.length > 0) {
+                    if (!window.confirm('Clear all selections and start over?')) return;
+                  }
+                  resetAll();
+                }}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 border border-red-200 hover:border-red-300 rounded-full mono text-[10px] uppercase tracking-widest text-red-600 hover:text-red-800 hover:bg-red-50 lift"
+                title="Clear all selections and start from step 1"
+              >
+                <RotateCcw className="w-3 h-3" strokeWidth={2.25} />
+                Start over
+              </button>
+            )}
+            <button
+              onClick={() => setShowApiKeyInput(v => !v)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 border hairline rounded-full mono text-[10px] uppercase tracking-widest text-stone-600 hover:bg-white lift"
+              title="Optional Census API key — raises rate limits for multi-county queries"
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${apiKey ? 'bg-emerald-600' : 'bg-stone-300'}`}></span>
+              API key {apiKey ? 'on' : 'off'}
+            </button>
+            <div className="mono text-xs text-stone-500 hidden sm:block">v4.3</div>
+          </div>
+        </div>
+
+        {showApiKeyInput && (
+          <div className="border-t hairline bg-white fadein">
+            <div className="max-w-6xl mx-auto px-8 py-4">
+              <div className="flex items-start gap-4 flex-wrap">
+                <div className="flex-1 min-w-0">
+                  <div className="mono text-[10px] uppercase tracking-widest text-stone-500 mb-1">Census API key (optional)</div>
+                  <div className="text-[11px] text-stone-600 leading-relaxed mb-2">
+                    Unauthenticated requests are limited to 500/day per IP, and multi-county queries can exhaust that quickly. Adding a free API key raises the limit substantially. Get one at{' '}
+                    <a href="https://api.census.gov/data/key_signup.html" target="_blank" rel="noopener noreferrer" className="underline hover:text-stone-900">api.census.gov/data/key_signup.html</a>
+                    {' '}(arrives by email in seconds). The key is stored only in your browser.
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <input
+                      type="text"
+                      value={apiKey}
+                      onChange={e => setApiKey(e.target.value.trim())}
+                      placeholder="Paste your 40-character key here"
+                      className="flex-1 min-w-0 px-3 py-2 border hairline bg-white rounded-sm mono text-[11px] focus:outline-none focus:hairline-strong"
+                      style={{ maxWidth: '480px' }}
+                    />
+                    {apiKey && (
+                      <button
+                        onClick={() => setApiKey('')}
+                        className="text-[11px] text-stone-500 hover:text-red-700 underline underline-offset-2"
+                      >
+                        Remove
+                      </button>
+                    )}
+                    <button
+                      onClick={() => setShowApiKeyInput(false)}
+                      className="text-[11px] text-stone-500 hover:text-stone-900 underline underline-offset-2"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </header>
+
+      {/* Census API status banner — visible at page top, scrolls away naturally */}
+      <div className="max-w-6xl mx-auto px-8 pt-6">
+        <div className="border border-sky-300 bg-sky-50 rounded-sm p-3">
+          <div className="flex items-start gap-2">
+            <Info className="w-4 h-4 text-sky-700 mt-0.5 flex-shrink-0" />
+            <div className="flex-1 min-w-0 text-[12px] text-sky-900 leading-relaxed">
+              <span className="font-medium">Experiencing issues with loading?</span>{' '}
+              The Census Data API may be experiencing issues — check the status at{' '}
+              <a
+                href="https://api.census.gov/status/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline underline-offset-2 hover:text-sky-950"
+              >api.census.gov/status</a>.
+              {!apiKey && (
+                <> You can also{' '}
+                  <button
+                    onClick={() => setShowApiKeyInput(true)}
+                    className="underline underline-offset-2 hover:text-sky-950 font-medium"
+                  >add your own free API key</button>
+                  {' '}(button at the top of the page) to raise rate limits and reduce intermittent failures.
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <main className="max-w-6xl mx-auto px-8 pt-6 pb-8 grid grid-cols-12 gap-8">
+        <div className="col-span-12 lg:col-span-7 space-y-10">
+
+          {/* SECTION 1: DATASET */}
+          {(() => {
+            const isCollapsed = !!selectedDataset && !manuallyExpanded.has(1);
+            return (
+              <section className="pop-in">
+                <SectionHeader
+                  number="01"
+                  title="Choose a dataset"
+                  onReset={() => resetFromStep(1)}
+                  canReset={!!selectedDataset}
+                  collapsed={isCollapsed}
+                  onExpand={() => toggleExpand(1)}
+                />
+                <div
+                  className={`grid overflow-hidden collapse-anim ${isCollapsed ? 'collapsed-grid opacity-0' : 'expanded-grid opacity-100'}`}
+                >
+                  <div className="min-h-0">
+                    {!recommendMode && (
+                      <button onClick={() => setRecommendMode(true)}
+                        className="mb-4 inline-flex items-center gap-2 px-3 py-1.5 border hairline rounded-full text-xs text-stone-700 hover:bg-stone-100 lift">
+                        <Info className="w-3.5 h-3.5" /> Not sure which one? Help me decide
+                      </button>
+                    )}
+                    {recommendMode && (
+                      <RecommendationWizard answers={recAnswers} setAnswers={setRecAnswers} onApply={applyRecommendation} onCancel={() => setRecommendMode(false)} />
+                    )}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      {Object.entries(DATASETS).map(([key, ds]) => (
+                        <button key={key} onClick={() => setSelectedDataset(key)}
+                          className={`text-left p-5 border lift rounded-sm ${selectedDataset === key ? 'hairline-strong bg-white shadow-sm' : 'hairline bg-white/60 hover:bg-white'}`}>
+                          <div className="flex items-start justify-between mb-2">
+                            <div className="mono text-[10px] uppercase tracking-widest text-stone-500">{ds.short}</div>
+                            {selectedDataset === key && <Check className="w-4 h-4 text-stone-900" />}
+                          </div>
+                          <div className="serif text-lg leading-tight mb-2">{ds.label}</div>
+                          <div className="text-xs text-stone-600 leading-relaxed">{ds.description}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </section>
+            );
+          })()}
+
+          {/* SECTION 2: YEAR */}
+          {selectedDataset && (() => {
+            const isCollapsed = !!selectedYear && !manuallyExpanded.has(2);
+            return (
+              <section ref={step2Ref} className="pop-in scroll-mt-20">
+                <SectionHeader
+                  number="02"
+                  title="Choose a year"
+                  onReset={() => resetFromStep(2)}
+                  canReset={!!selectedYear}
+                  collapsed={isCollapsed}
+                  onExpand={() => toggleExpand(2)}
+                />
+                <div
+                  className={`grid overflow-hidden collapse-anim ${isCollapsed ? 'collapsed-grid opacity-0' : 'expanded-grid opacity-100'}`}
+                >
+                  <div className="min-h-0">
+                    <div className="flex items-start gap-3 mb-3 text-xs text-stone-600">
+                      <Calendar className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                      <span>Geographic boundaries change between decades. Years <span className="mono">2009–2019</span> use 2010 census geographies; <span className="mono">2020+</span> uses 2020 geographies.</span>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {dataset.years.slice().reverse().map(yr => (
+                        <button key={yr} onClick={() => setSelectedYear(yr)}
+                          className={`px-3 py-1.5 mono text-xs border lift rounded-sm ${selectedYear === yr ? 'hairline-strong bg-stone-900 text-stone-50' : 'hairline bg-white hover:bg-stone-100'}`}>
+                          {yr}
+                          <span className="ml-1 text-[9px] text-stone-400">{yr >= 2020 ? "'20" : "'10"}</span>
+                        </button>
+                      ))}
+                    </div>
+                    {selectedDataset === 'acs1' && (
+                      <div className="mt-3 text-[11px] text-stone-500 italic">Note: ACS 1-Year was not released for 2020 due to pandemic data collection issues.</div>
+                    )}
+                  </div>
+                </div>
+              </section>
+            );
+          })()}
+
+          {/* SECTION 3: GEOGRAPHY — SPLIT INTO NESTING + NON-NESTING */}
+          {selectedYear && (() => {
+            const isCollapsed = stepThreeComplete && !manuallyExpanded.has(3);
+            return (
+              <section ref={step3Ref} className="pop-in scroll-mt-20">
+                <SectionHeader
+                  number="03"
+                  title="Choose a geography"
+                  onReset={() => resetFromStep(3)}
+                  canReset={!!selectedGeo || filterScope.type !== 'none'}
+                  collapsed={isCollapsed}
+                  onExpand={() => toggleExpand(3)}
+                />
+                <div
+                  className={`grid overflow-hidden collapse-anim ${isCollapsed ? 'collapsed-grid opacity-0' : 'expanded-grid opacity-100'}`}
+                >
+                  <div className="min-h-0">
+                    {!selectedGeo && (
+                      <div className="fadein">
+                        {/* Nesting geographies */}
+                        <div className="mb-6">
+                          <div className="flex items-center gap-2 mb-3">
+                            <Network className="w-3.5 h-3.5 text-stone-700" strokeWidth={1.5} />
+                            <div className="mono text-[10px] uppercase tracking-widest text-stone-700">Core Nesting Hierarchy</div>
+                            <span className="h-px flex-1 bg-stone-200" />
+                          </div>
+                          <div className="text-[11px] text-stone-500 mb-3 leading-relaxed">
+                            Each level cleanly nests inside the next: <span className="mono">block → block group → tract → county → state → nation</span>. Ideal for aggregation and roll-ups.
+                          </div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                            {nestingGeos.map(g => (
+                              <GeoCard key={g} g={g} selected={false} onSelect={() => setSelectedGeo(g)} />
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Non-nesting geographies */}
+                        {nonNestingGeos.length > 0 && (
+                          <div>
+                            <div className="flex items-center gap-2 mb-3">
+                              <GitBranch className="w-3.5 h-3.5 text-stone-700" strokeWidth={1.5} />
+                              <div className="mono text-[10px] uppercase tracking-widest text-stone-700">Non-Nesting Geographies</div>
+                              <span className="h-px flex-1 bg-stone-200" />
+                            </div>
+                            <div className="text-[11px] text-stone-500 mb-3 leading-relaxed">
+                              Cross county and state lines or redefine periodically. Not compatible with strict nesting-based aggregation.
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                              {nonNestingGeos.map(g => (
+                                <GeoCard key={g} g={g} selected={false} onSelect={() => setSelectedGeo(g)} />
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {selectedGeo && GEOGRAPHIES[selectedGeo] && (
+                      <div className="fadein">
+                        {/* Compact selected geography summary */}
+                        <div className="border hairline-strong bg-white p-4 rounded-sm mb-4">
+                          <div className="flex items-baseline justify-between gap-3 flex-wrap">
+                            <div className="flex items-baseline gap-3 flex-1 min-w-0">
+                              <Check className="w-4 h-4 text-stone-900 flex-shrink-0 self-center" />
+                              <div className="min-w-0">
+                                <div className="serif text-lg leading-tight">{GEOGRAPHIES[selectedGeo].label}</div>
+                                <div className="text-[11px] text-stone-500 mt-0.5">
+                                  {GEOGRAPHIES[selectedGeo].group === 'nesting' ? 'Nesting' : 'Non-nesting'} · {GEOGRAPHIES[selectedGeo].vintages}
+                                </div>
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => { setSelectedGeo(null); setFilterScope({ type: 'none' }); }}
+                              className="text-[11px] text-stone-500 hover:text-stone-900 underline underline-offset-2"
+                            >
+                              change
+                            </button>
+                          </div>
+                          <div className="text-[11px] text-stone-700 leading-relaxed mt-2 pt-2 border-t hairline">
+                            {GEOGRAPHIES[selectedGeo].note}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* FILTER SCOPE — new nested filtering */}
+                    {selectedGeo && isFilterable && (
+                      <FilterScopePicker
+                        geo={selectedGeo}
+                        requiredScope={requiredScope}
+                        filterScope={filterScope}
+                        setFilterScope={setFilterScope}
+                      />
+                    )}
+                  </div>
+                </div>
+              </section>
+            );
+          })()}
+
+          {/* SECTION 4: VARIABLES */}
+          {selectedGeo && canContinueToVariables({ selectedGeo, requiredScope, filterScope }) && (
+            <section ref={step4Ref} className="pop-in scroll-mt-20">
+              <SectionHeader
+                number="04"
+                title="Choose variables"
+                onReset={() => resetFromStep(4)}
+                canReset={!!selectedUniverse || !!selectedTable || selectedVars.length > 0}
+              />
+              {dataset.hasUniverses ? (
+                <>
+                  <VariableBreadcrumb
+                    universe={selectedUniverse} table={selectedTable}
+                    onUniverseClick={() => { setSelectedUniverse(null); setSelectedTable(null); }}
+                    onTableClick={() => setSelectedTable(null)}
+                    onOpenSearch={() => { setShowVarSearch(true); loadVarCatalog(); }}
+                  />
+
+                  {!selectedUniverse && (
+                    <div className="fadein">
+                      <div className="text-xs text-stone-600 mb-4 leading-relaxed">
+                        Start by choosing a <span className="font-medium text-stone-900">universe</span> — the population or unit the data describes. Each universe has its own denominator, so mixing variables across universes requires careful interpretation.
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {Object.entries(UNIVERSES).map(([key, u]) => {
+                          const Icon = u.icon;
+                          return (
+                            <button key={key} onClick={() => setSelectedUniverse(key)}
+                              className="text-left p-5 border hairline bg-white/60 hover:bg-white rounded-sm lift group">
+                              <div className="flex items-start gap-3 mb-2">
+                                <Icon className="w-5 h-5 mt-0.5 text-stone-700 group-hover:text-stone-900" strokeWidth={1.5} />
+                                <div className="flex-1">
+                                  <div className="serif text-lg leading-tight">{u.label}</div>
+                                  <div className="mono text-[10px] uppercase tracking-widest text-stone-500 mt-0.5">{CORE_TABLES.filter(t => t.universe === key).length} core tables</div>
+                                </div>
+                              </div>
+                              <div className="text-xs text-stone-600 leading-relaxed mb-2">{u.description}</div>
+                              <div className="text-[11px] text-stone-500 leading-relaxed border-t hairline pt-2 mt-2">
+                                <div><span className="font-medium text-stone-700">Denominator:</span> {u.denominator}</div>
+                                <div className="mt-1"><span className="font-medium text-stone-700">Topics:</span> {u.examples}</div>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {selectedUniverse && !selectedTable && (
+                    <div className="fadein">
+                      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+                        <div className="flex items-baseline gap-3">
+                          <div className="serif text-lg">{UNIVERSES[selectedUniverse].label} tables</div>
+                          <span className="mono text-[10px] uppercase tracking-widest text-stone-500">
+                            {tablesForUniverse.length} table{tablesForUniverse.length !== 1 ? 's' : ''}
+                          </span>
+                        </div>
+                        {varCatalog && (
+                          <button onClick={() => setShowExtendedTables(!showExtendedTables)}
+                            className="text-[11px] text-stone-600 hover:text-stone-900 underline underline-offset-2">
+                            {showExtendedTables ? 'Core tables only' : 'Show all discovered tables'}
+                          </button>
+                        )}
+                      </div>
+                      {catalogLoading && (
+                        <div className="flex items-center gap-2 text-xs text-stone-500 mb-3">
+                          <Loader2 className="w-3 h-3 animate-spin" /> Loading variable catalog…
+                        </div>
+                      )}
+                      <div className="space-y-5">
+                        {Object.entries(tablesByTopic).map(([topic, tables]) => (
+                          <div key={topic}>
+                            <div className="mono text-[10px] uppercase tracking-widest text-stone-500 mb-2 flex items-center gap-2">
+                              <span>{topic}</span>
+                              <span className="h-px flex-1 bg-stone-200" />
+                            </div>
+                            <div className="space-y-1.5">
+                              {tables.map(t => (
+                                <button key={t.id} onClick={() => setSelectedTable(t)}
+                                  className="w-full text-left px-4 py-3 border hairline bg-white/60 hover:bg-white rounded-sm lift group">
+                                  <div className="flex items-baseline justify-between gap-3 flex-wrap">
+                                    <div className="flex-1 min-w-0">
+                                      <div className="flex items-baseline gap-2 flex-wrap">
+                                        <span className="mono text-[11px] text-stone-500 group-hover:text-stone-900">{t.id}</span>
+                                        <span className="text-sm text-stone-900">{t.name}</span>
+                                        {t.priority === 'extended' && (<span className="text-[9px] uppercase tracking-widest text-stone-400 bg-stone-100 px-1.5 py-0.5 rounded">extended</span>)}
+                                      </div>
+                                      <div className="text-[11px] text-stone-500 mt-0.5"><span className="italic">Subset: {t.subset}</span></div>
+                                    </div>
+                                    <ChevronRight className="w-4 h-4 text-stone-400 group-hover:text-stone-900 flex-shrink-0" />
+                                  </div>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {selectedUniverse && selectedTable && (
+                    <div className="fadein">
+                      <div className="border hairline-strong bg-white p-4 rounded-sm mb-4">
+                        <div className="flex items-baseline gap-2 mb-2 flex-wrap">
+                          <span className="mono text-xs text-stone-500">{selectedTable.id}</span>
+                          <span className="serif text-lg">{selectedTable.name}</span>
+                        </div>
+                        <div className="text-xs text-stone-600 grid grid-cols-1 sm:grid-cols-3 gap-2">
+                          <div><span className="font-medium">Universe:</span> {UNIVERSES[selectedTable.universe]?.label}</div>
+                          <div><span className="font-medium">Subset:</span> {selectedTable.subset}</div>
+                          <div><span className="font-medium">Topic:</span> {selectedTable.topic}</div>
+                        </div>
+                      </div>
+                      {catalogLoading && (
+                        <div className="flex items-center gap-2 text-xs text-stone-500 py-6 justify-center">
+                          <Loader2 className="w-4 h-4 animate-spin" /> Loading variables for {selectedTable.id}…
+                        </div>
+                      )}
+                      {!catalogLoading && variablesInTable.length === 0 && (
+                        <div className="text-xs text-stone-600 italic p-4 bg-stone-100 rounded-sm">
+                          No variables found for table {selectedTable.id} in the {selectedYear} {dataset.short} catalog.
+                        </div>
+                      )}
+                      {variablesInTable.length > 0 && (
+                        <>
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="mono text-[10px] uppercase tracking-widest text-stone-500">{variablesInTable.length} variables in this table</div>
+                            <button onClick={() => {
+                              const universe = selectedTable.universe;
+                              const newVars = variablesInTable.map(v => ({ code: v.code, label: v.label, tableId: v.tableId, universe }));
+                              setSelectedVars(prev => {
+                                const existingCodes = new Set(prev.map(p => p.code));
+                                const toAdd = newVars.filter(v => !existingCodes.has(v.code));
+                                return [...prev, ...toAdd];
+                              });
+                            }} className="text-[11px] text-stone-600 hover:text-stone-900 underline underline-offset-2">Select all</button>
+                          </div>
+                          <div className="space-y-1 max-h-96 overflow-y-auto scrollbar-thin pr-1">
+                            {variablesInTable.map(v => {
+                              const checked = !!selectedVars.find(s => s.code === v.code);
+                              return (
+                                <label key={v.code}
+                                  className={`flex items-start gap-3 px-3 py-2 border rounded-sm cursor-pointer lift ${checked ? 'hairline-strong bg-white' : 'hairline bg-white/60 hover:bg-white'}`}>
+                                  <div className={`w-4 h-4 mt-0.5 border flex items-center justify-center flex-shrink-0 ${checked ? 'bg-stone-900 border-stone-900' : 'border-stone-400'}`}>
+                                    {checked && <Check className="w-3 h-3 text-stone-50" />}
+                                  </div>
+                                  <input type="checkbox" checked={checked}
+                                    onChange={() => toggleVar({ code: v.code, label: v.label, tableId: v.tableId, universe: selectedTable.universe })}
+                                    className="hidden" />
+                                  <div className="flex-1 min-w-0 text-[13px] leading-snug">{v.label}</div>
+                                  <div className="mono text-[10px] text-stone-400 flex-shrink-0 mt-0.5">{v.code}</div>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        </>
+                      )}
+                      <div className="mt-4 pt-3 border-t hairline flex items-center gap-2 flex-wrap">
+                        <button onClick={() => setSelectedTable(null)}
+                          className="inline-flex items-center gap-1 text-xs text-stone-600 hover:text-stone-900">
+                          <ChevronLeft className="w-3.5 h-3.5" /> Different table
+                        </button>
+                        <span className="text-stone-300">·</span>
+                        <button onClick={() => { setSelectedUniverse(null); setSelectedTable(null); }}
+                          className="inline-flex items-center gap-1 text-xs text-stone-600 hover:text-stone-900">
+                          Different universe
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {universesInUse.length > 1 && (
+                    <div className="mt-4 p-3 border border-amber-300 bg-amber-50/50 rounded-sm">
+                      <div className="flex items-start gap-2 text-[11px] text-amber-900 leading-relaxed">
+                        <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+                        <div><span className="font-medium">Mixed universes in selection.</span> You've selected variables from {universesInUse.length} universes ({universesInUse.map(u => UNIVERSES[u]?.label || u).join(', ')}). Percentages and ratios across them will not be directly comparable.</div>
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  <div className="text-xs text-stone-600 mb-3">The Decennial Census has a smaller, fixed variable set. Select below or use search for additional variables.</div>
+                  <button onClick={() => { setShowVarSearch(true); loadVarCatalog(); }}
+                    className="w-full mb-3 flex items-center gap-2 px-3 py-2.5 border hairline-strong bg-stone-900 text-stone-50 rounded-sm hover:bg-stone-800 lift">
+                    <Search className="w-4 h-4" /><span className="text-sm">Search the full variable catalog</span>
+                  </button>
+                  <div className="space-y-1">
+                    {DECENNIAL_PRESETS[selectedDataset]?.map(v => {
+                      const checked = !!selectedVars.find(s => s.code === v.code);
+                      return (
+                        <label key={v.code}
+                          className={`flex items-center gap-3 px-3 py-2 border rounded-sm cursor-pointer lift ${checked ? 'hairline-strong bg-white' : 'hairline bg-white/60 hover:bg-white'}`}>
+                          <div className={`w-4 h-4 border flex items-center justify-center ${checked ? 'bg-stone-900 border-stone-900' : 'border-stone-400'}`}>
+                            {checked && <Check className="w-3 h-3 text-stone-50" />}
+                          </div>
+                          <input type="checkbox" checked={checked}
+                            onChange={() => toggleVar({ code: v.code, label: v.label, tableId: extractTableId(v.code), universe: null })}
+                            className="hidden" />
+                          <div className="flex-1 text-sm">{v.label}</div>
+                          <div className="mono text-[10px] text-stone-400">{v.code}</div>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+            </section>
+          )}
+
+          {selectedVars.length > 0 && (
+            <section className="fadein pt-4 border-t hairline">
+              <button onClick={fetchPreview} disabled={!canPreview || loading}
+                className="w-full md:w-auto inline-flex items-center justify-center gap-2 px-6 py-3 bg-stone-900 text-stone-50 rounded-sm hover:bg-stone-800 disabled:opacity-40 disabled:cursor-not-allowed lift">
+                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Eye className="w-4 h-4" />}
+                <span className="text-sm">{loading ? (loadingMsg || 'Fetching…') : 'Run query'}</span>
+                {!loading && <ArrowRight className="w-4 h-4" />}
+              </button>
+              {requiredScope !== 'none' && filterScope.type === 'none' && (
+                <div className="mt-3 text-xs text-amber-700 flex items-center gap-2">
+                  <AlertCircle className="w-3.5 h-3.5" /> Choose a filter scope above.
+                </div>
+              )}
+            </section>
+          )}
+        </div>
+
+        {/* RIGHT SUMMARY PANEL */}
+        <aside className="col-span-12 lg:col-span-5 space-y-4">
+          <div className="border hairline-strong bg-white p-6 rounded-sm sticky top-20">
+            <div className="mono text-[10px] uppercase tracking-widest text-stone-500 mb-3">Query Summary</div>
+            {!selectedDataset && (
+              <div className="serif text-stone-400 text-lg italic leading-snug">Begin by choosing a dataset on the left.</div>
+            )}
+            {selectedDataset && (
+              <div className="space-y-3 text-sm">
+                <Row icon={<Database className="w-3.5 h-3.5" />} label="Dataset" value={dataset.short} />
+                {selectedYear && <Row icon={<Calendar className="w-3.5 h-3.5" />} label="Year" value={selectedYear} mono />}
+                {selectedGeo && (
+                  <Row icon={<Map className="w-3.5 h-3.5" />} label="Geography"
+                    value={GEOGRAPHIES[selectedGeo].label}
+                    sub={<FilterScopeSummary filterScope={filterScope} />} />
+                )}
+                {selectedVars.length > 0 && (
+                  <div className="pt-2 border-t hairline">
+                    <div className="mono text-[10px] uppercase tracking-widest text-stone-500 mb-2">
+                      {selectedVars.length} variable{selectedVars.length > 1 ? 's' : ''}
+                      {universesInUse.length > 0 && (<span className="ml-2 normal-case text-stone-400">across {universesInUse.map(u => UNIVERSES[u]?.label || u).join(' + ')}</span>)}
+                    </div>
+                    <div className="space-y-1 max-h-48 overflow-y-auto scrollbar-thin pr-2">
+                      {selectedVars.map(v => (
+                        <div key={v.code} className="text-xs text-stone-700 flex items-baseline justify-between gap-2 group">
+                          <span className="truncate flex-1">{v.label}</span>
+                          <span className="mono text-[10px] text-stone-400 flex-shrink-0">{v.code}</span>
+                          <button onClick={() => toggleVar(v)} className="opacity-0 group-hover:opacity-100 text-stone-400 hover:text-red-600 transition-opacity">
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </aside>
+
+        {/* PREVIEW & EXPORT */}
+        {(previewData || error) && (
+          <div className="col-span-12 fadein">
+            <div className="border hairline-strong bg-white rounded-sm">
+              <div className="border-b hairline px-6 py-4 flex items-center justify-between flex-wrap gap-3">
+                <div className="flex items-baseline gap-3">
+                  <h2 className="serif text-xl">Results</h2>
+                  {previewData && (
+                    <span className="mono text-[10px] uppercase tracking-widest text-stone-500">
+                      {(previewData.length - 1).toLocaleString()} rows · {selectedVars.length} variables
+                    </span>
+                  )}
+                </div>
+                {previewData && (
+                  <button onClick={() => downloadFile(
+                    `census_${selectedDataset}_${selectedYear}_${selectedGeo.replace(/[^a-z0-9]/gi, '_')}.csv`,
+                    toCSV(previewData)
+                  )}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-stone-900 text-stone-50 rounded-sm hover:bg-stone-800 lift text-xs">
+                    <Download className="w-3.5 h-3.5" /> Download data (CSV)
+                  </button>
+                )}
+              </div>
+              {error && (
+                <div className="p-6">
+                  <div className="text-xs text-red-700 bg-red-50 border border-red-200 p-3 rounded-sm">
+                    <div className="font-medium mb-1 flex items-center gap-1.5"><AlertCircle className="w-3.5 h-3.5" /> Request failed</div>
+                    <div className="mono text-[10px] leading-relaxed">{error}</div>
+                  </div>
+                </div>
+              )}
+              {previewData && previewData.length > 1 && (
+                <>
+                  {partialFailures && partialFailures.failedCount > 0 && (
+                    <div className="mx-6 mt-6 p-3 border border-amber-300 bg-amber-50 rounded-sm">
+                      <div className="flex items-start gap-2">
+                        <AlertCircle className="w-3.5 h-3.5 text-amber-800 mt-0.5 flex-shrink-0" />
+                        <div className="flex-1">
+                          <div className="text-[11px] text-amber-900 font-medium mb-1">
+                            Partial results: {partialFailures.failedCount} county request{partialFailures.failedCount > 1 ? 's' : ''} failed.
+                          </div>
+                          <div className="text-[11px] text-amber-900 leading-relaxed mb-1">
+                            The table below is missing rows from these counties. Try running the query again — transient rate-limit errors are the most common cause.
+                            {!apiKey && (
+                              <> If this keeps happening, <button onClick={() => setShowApiKeyInput(true)} className="underline underline-offset-2 hover:text-amber-950">add a free Census API key</button> to raise the rate limit.</>
+                            )}
+                          </div>
+                          <details className="text-[11px] text-amber-900">
+                            <summary className="cursor-pointer hover:text-amber-950 select-none">Show failed counties</summary>
+                            <ul className="mt-2 space-y-0.5 mono text-[10px]">
+                              {partialFailures.failures.map((f, i) => (
+                                <li key={i}>• <span className="font-medium">{f.name}</span>: {f.error}</li>
+                              ))}
+                            </ul>
+                          </details>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  <div className="p-6"><PreviewTable data={previewData} varLabelMap={varLabelMap} /></div>
+                  <div className="border-t hairline bg-stone-50/60 px-6 py-5">
+                    <div className="flex items-baseline gap-3 mb-3">
+                      <Layers className="w-4 h-4 text-stone-700" />
+                      <h3 className="serif text-lg">Geography (TIGER/Line)</h3>
+                      <span className="mono text-[10px] uppercase tracking-widest text-stone-500">join key: GEO_ID</span>
+                    </div>
+                    {shapefileMultiState ? (
+                      <div className="text-xs text-stone-600 leading-relaxed">
+                        Your selection spans multiple states. Download the relevant state TIGER/Line shapefiles individually from <a href="https://www2.census.gov/geo/tiger/" target="_blank" rel="noopener noreferrer" className="underline hover:text-stone-900">www2.census.gov/geo/tiger</a> and merge them in GIS, then join on GEOID.
+                      </div>
+                    ) : shapefile ? (
+                      <ShapefileExport shapefile={shapefile} />
+                    ) : (
+                      <div className="text-xs text-stone-600 italic">Shapefile not available for this geography configuration.</div>
+                    )}
+                  </div>
+                </>
+              )}
+              {previewData && previewData.length <= 1 && (
+                <div className="p-6 text-xs text-stone-500 italic">No rows returned for this query.</div>
+              )}
+            </div>
+          </div>
+        )}
+      </main>
+
+      <footer className="max-w-6xl mx-auto px-8 py-12 border-t hairline mt-16">
+        <div className="flex items-baseline justify-between text-[11px] text-stone-500 flex-wrap gap-3">
+          <div>Data from <span className="mono">api.census.gov</span> · Geographies from <span className="mono">www2.census.gov/geo/tiger</span></div>
+          <div className="mono uppercase tracking-widest">API key optional</div>
+        </div>
+      </footer>
+
+      {showVarSearch && (
+        <VariableSearchModal
+          onClose={() => setShowVarSearch(false)}
+          loading={catalogLoading} error={catalogError}
+          catalog={varCatalog} query={varSearchQuery} setQuery={setVarSearchQuery}
+          filtered={filteredCatalog} selectedVars={selectedVars} toggleVar={toggleVar}
+          datasetLabel={dataset?.short} year={selectedYear}
+        />
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// HELPER: can continue to step 4?
+// ============================================================================
+
+function canContinueToVariables({ selectedGeo, requiredScope, filterScope }) {
+  if (!selectedGeo) return false;
+  if (requiredScope === 'none') return true;
+  if (filterScope.type === 'state' && filterScope.stateFips) return true;
+  if (filterScope.type === 'counties' && filterScope.countyRefs?.length > 0) return true;
+  if (filterScope.type === 'msa' && filterScope.msaCodes?.length > 0) return true;
+  return false;
+}
+
+// ============================================================================
+// FILTER SCOPE PICKER — new nested filter UI
+// ============================================================================
+
+function FilterScopePicker({ geo, requiredScope, filterScope, setFilterScope }) {
+  // Available filter modes depend on the geography
+  // - tract, block group, block, county, place: state (required), counties (refine), msa (multi-county)
+  // For county: state is enough (county *is* the filter in that case, but user can still choose a state subset)
+  // - cd, cbsa: state optional (these are not nested, but we allow state filtering for browsing)
+
+  const isBGorBlock = geo === 'block group' || geo === 'block';
+  const isTractOrCounty = geo === 'tract' || geo === 'county';
+  const isPlace = geo === 'place';
+
+  // Filter modes to offer
+  const modes = [];
+  if (requiredScope !== 'none') {
+    modes.push({ key: 'state', label: 'All in a state', description: 'Standard state-wide pull.', icon: MapPin });
+    if (isBGorBlock || isTractOrCounty) {
+      modes.push({ key: 'counties', label: 'Specific counties', description: 'One or more counties across one or more states.', icon: Network });
+      modes.push({ key: 'msa', label: 'Within an MSA', description: 'All counties in a metro/micropolitan area.', icon: GitBranch });
+    }
+  }
+
+  return (
+    <div className="mt-5 fadein">
+      <div className="flex items-center gap-2 mb-3">
+        <Network className="w-3.5 h-3.5 text-stone-700" strokeWidth={1.5} />
+        <div className="mono text-[10px] uppercase tracking-widest text-stone-700">Filter Scope</div>
+        <span className="h-px flex-1 bg-stone-200" />
+      </div>
+      <div className="text-[11px] text-stone-500 mb-3 leading-relaxed">
+        {isBGorBlock
+          ? `Block groups and blocks require a state+county scope. Choose how you want to define the area.`
+          : `Narrow your query to a specific area. Smaller scopes return faster.`}
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-4">
+        {modes.map(m => {
+          const Icon = m.icon;
+          const active = filterScope.type === m.key;
+          return (
+            <button key={m.key} onClick={() => setFilterScope({ type: m.key })}
+              className={`text-left p-3 border lift rounded-sm ${active ? 'hairline-strong bg-white shadow-sm' : 'hairline bg-white/60 hover:bg-white'}`}>
+              <div className="flex items-start gap-2">
+                <Icon className="w-3.5 h-3.5 mt-0.5 text-stone-700 flex-shrink-0" strokeWidth={1.5} />
+                <div>
+                  <div className="text-sm text-stone-900">{m.label}</div>
+                  <div className="text-[11px] text-stone-500 mt-0.5 leading-snug">{m.description}</div>
+                </div>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {filterScope.type === 'state' && (
+        <div className="fadein">
+          <label className="mono text-[10px] uppercase tracking-widest text-stone-500 block mb-2">State</label>
+          <select value={filterScope.stateFips || ''} onChange={e => setFilterScope({ type: 'state', stateFips: e.target.value })}
+            className="w-full px-3 py-2 border hairline bg-white rounded-sm text-sm focus:outline-none focus:hairline-strong">
+            <option value="">— Select a state —</option>
+            {STATES.map(s => (<option key={s.fips} value={s.fips}>{s.name}</option>))}
+          </select>
+        </div>
+      )}
+
+      {(filterScope.type === 'counties' || filterScope.type === 'msa') && (
+        <SingleOrMultiToggle
+          filterScope={filterScope}
+          setFilterScope={setFilterScope}
+          label={filterScope.type === 'counties' ? 'How many counties?' : 'How many MSAs?'}
+          singleLabel={filterScope.type === 'counties' ? 'Just one county' : 'Just one MSA'}
+          multiLabel={filterScope.type === 'counties' ? 'Multiple counties' : 'Multiple MSAs'}
+        />
+      )}
+
+      {filterScope.type === 'counties' && filterScope.multi !== undefined && (
+        <CountyMultiPicker
+          countyRefs={filterScope.countyRefs || []}
+          setCountyRefs={refs => setFilterScope(prev => ({ ...prev, countyRefs: refs, confirmed: false }))}
+          multi={filterScope.multi}
+          confirmed={!!filterScope.confirmed}
+          onConfirm={() => setFilterScope(prev => ({ ...prev, confirmed: true }))}
+          onEditAgain={() => setFilterScope(prev => ({ ...prev, confirmed: false }))}
+        />
+      )}
+
+      {filterScope.type === 'msa' && filterScope.multi !== undefined && (
+        <MSAPicker
+          msaCodes={filterScope.msaCodes || []}
+          setMsaCodes={codes => setFilterScope(prev => ({ ...prev, msaCodes: codes, confirmed: false }))}
+          multi={filterScope.multi}
+          confirmed={!!filterScope.confirmed}
+          onConfirm={() => setFilterScope(prev => ({ ...prev, confirmed: true }))}
+          onEditAgain={() => setFilterScope(prev => ({ ...prev, confirmed: false }))}
+        />
+      )}
+    </div>
+  );
+}
+
+// Toggle between "single" and "multiple" selection modes for counties/MSAs.
+// Renders two options; selecting one sets filterScope.multi accordingly.
+function SingleOrMultiToggle({ filterScope, setFilterScope, label, singleLabel, multiLabel }) {
+  const currentMulti = filterScope.multi;
+
+  function pick(multi) {
+    // Switching mode clears any current selections and unconfirms
+    setFilterScope({
+      type: filterScope.type,
+      multi,
+      confirmed: false,
+      countyRefs: [],
+      msaCodes: [],
+    });
+  }
+
+  return (
+    <div className="fadein mb-4">
+      <label className="mono text-[10px] uppercase tracking-widest text-stone-500 block mb-2">{label}</label>
+      <div className="grid grid-cols-2 gap-2">
+        <button
+          onClick={() => pick(false)}
+          className={`text-left p-3 border lift rounded-sm ${currentMulti === false ? 'hairline-strong bg-white shadow-sm' : 'hairline bg-white/60 hover:bg-white'}`}
+        >
+          <div className="text-sm text-stone-900">{singleLabel}</div>
+          <div className="text-[11px] text-stone-500 mt-0.5 leading-snug">Pick one and continue.</div>
+        </button>
+        <button
+          onClick={() => pick(true)}
+          className={`text-left p-3 border lift rounded-sm ${currentMulti === true ? 'hairline-strong bg-white shadow-sm' : 'hairline bg-white/60 hover:bg-white'}`}
+        >
+          <div className="text-sm text-stone-900">{multiLabel}</div>
+          <div className="text-[11px] text-stone-500 mt-0.5 leading-snug">Pick several, then confirm when done.</div>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function CountyMultiPicker({ countyRefs, setCountyRefs, multi, confirmed, onConfirm, onEditAgain }) {
+  const [pickerState, setPickerState] = useState('');
+  const [countyCache, setCountyCache] = useState({}); // { stateFips: [{fips, name}, ...] }
+  const [statusByState, setStatusByState] = useState({}); // { stateFips: 'loading' | 'ready' | 'error' }
+  const [errorByState, setErrorByState] = useState({});
+  const [countySearch, setCountySearch] = useState('');
+
+  // Reset search when user switches state
+  useEffect(() => { setCountySearch(''); }, [pickerState]);
+
+  // Fetch counties for a state the first time it's selected
+  useEffect(() => {
+    if (!pickerState) return;
+    if (countyCache[pickerState] || statusByState[pickerState] === 'loading') return;
+
+    let cancelled = false;
+    async function fetchCounties() {
+      setStatusByState(prev => ({ ...prev, [pickerState]: 'loading' }));
+      setErrorByState(prev => ({ ...prev, [pickerState]: null }));
+
+      // Try years in order: most stable first (2023), then fall back
+      const yearsToTry = [2023, 2022, 2021];
+      let lastError = null;
+
+      for (const year of yearsToTry) {
+        try {
+          const url = `https://api.census.gov/data/${year}/acs/acs5?get=NAME&for=county:*&in=state:${pickerState}`;
+          const res = await fetch(url);
+          if (cancelled) return;
+
+          if (!res.ok) {
+            lastError = `HTTP ${res.status}`;
+            continue;
+          }
+
+          const rows = await res.json();
+          if (cancelled) return;
+
+          if (!Array.isArray(rows) || rows.length < 2) {
+            lastError = 'Empty response';
+            continue;
+          }
+
+          // First row is headers: ["NAME", "state", "county"]
+          const headers = rows[0];
+          const nameIdx = headers.indexOf('NAME');
+          const countyIdx = headers.indexOf('county');
+
+          if (nameIdx === -1 || countyIdx === -1) {
+            lastError = 'Unexpected response format';
+            continue;
+          }
+
+          const counties = rows.slice(1)
+            .map(r => ({
+              fips: r[countyIdx],
+              name: (r[nameIdx] || '').split(',')[0].replace(/\s+County$/i, '').replace(/\s+Parish$/i, '').replace(/\s+Borough$/i, '').replace(/\s+Census Area$/i, ''),
+              fullName: (r[nameIdx] || '').split(',')[0],
+            }))
+            .filter(c => c.fips && c.fullName)
+            .sort((a, b) => a.fullName.localeCompare(b.fullName));
+
+          setCountyCache(prev => ({ ...prev, [pickerState]: counties }));
+          setStatusByState(prev => ({ ...prev, [pickerState]: 'ready' }));
+          return;
+        } catch (e) {
+          if (cancelled) return;
+          lastError = e.message || 'Network error';
+        }
+      }
+
+      // All attempts failed
+      setStatusByState(prev => ({ ...prev, [pickerState]: 'error' }));
+      setErrorByState(prev => ({ ...prev, [pickerState]: lastError || 'Failed to load counties' }));
+    }
+
+    fetchCounties();
+    return () => { cancelled = true; };
+  }, [pickerState]);
+
+  const counties = pickerState ? (countyCache[pickerState] || []) : [];
+
+  // Filter counties by search query (case-insensitive, matches name or FIPS)
+  const filteredCounties = useMemo(() => {
+    if (!countySearch.trim()) return counties;
+    const q = countySearch.toLowerCase().trim();
+    return counties.filter(c =>
+      c.fullName.toLowerCase().includes(q) || c.fips.includes(q)
+    );
+  }, [counties, countySearch]);
+  const status = pickerState ? statusByState[pickerState] : null;
+  const stateError = pickerState ? errorByState[pickerState] : null;
+
+  const isSelected = (stateFips, countyFips) =>
+    countyRefs.some(r => r.stateFips === stateFips && r.countyFips === countyFips);
+
+  function toggleCounty(stateFips, countyFips, fullName) {
+    const stateName = STATES.find(s => s.fips === stateFips)?.name || '';
+    const already = isSelected(stateFips, countyFips);
+
+    if (multi) {
+      // Multi mode: toggle in/out of the array
+      if (already) {
+        setCountyRefs(countyRefs.filter(r => !(r.stateFips === stateFips && r.countyFips === countyFips)));
+      } else {
+        setCountyRefs([...countyRefs, { stateFips, countyFips, name: `${fullName}, ${stateName}` }]);
+      }
+    } else {
+      // Single mode: replace current selection and auto-confirm
+      setCountyRefs([{ stateFips, countyFips, name: `${fullName}, ${stateName}` }]);
+      onConfirm?.();
+    }
+  }
+
+  return (
+    <div className="fadein">
+      <label className="mono text-[10px] uppercase tracking-widest text-stone-500 block mb-2">Browse by state</label>
+      <select
+        value={pickerState}
+        onChange={e => setPickerState(e.target.value)}
+        className="w-full px-3 py-2 border hairline bg-white rounded-sm text-sm focus:outline-none focus:hairline-strong mb-3"
+      >
+        <option value="">— Select a state to see its counties —</option>
+        {STATES.map(s => (<option key={s.fips} value={s.fips}>{s.name}</option>))}
+      </select>
+
+      {pickerState && status === 'loading' && (
+        <div className="text-xs text-stone-500 flex items-center gap-2 py-3 px-3 border hairline rounded-sm bg-white mb-3">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading counties for {STATES.find(s => s.fips === pickerState)?.name}…
+        </div>
+      )}
+
+      {pickerState && status === 'error' && (
+        <div className="text-xs text-red-700 bg-red-50 border border-red-200 p-3 rounded-sm mb-3">
+          <div className="font-medium mb-1 flex items-center gap-1.5"><AlertCircle className="w-3.5 h-3.5" /> Could not load counties</div>
+          <div className="mono text-[10px] leading-relaxed">{stateError}</div>
+          <button
+            onClick={() => {
+              setStatusByState(prev => { const n = { ...prev }; delete n[pickerState]; return n; });
+              setCountyCache(prev => { const n = { ...prev }; delete n[pickerState]; return n; });
+              // Force re-trigger by toggling
+              const s = pickerState;
+              setPickerState('');
+              setTimeout(() => setPickerState(s), 0);
+            }}
+            className="mt-2 text-[11px] underline underline-offset-2 hover:text-red-900"
+          >Retry</button>
+        </div>
+      )}
+
+      {pickerState && status === 'ready' && counties.length > 0 && (
+        <div className="mb-4">
+          {/* Search box */}
+          <div className="relative mb-2">
+            <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-stone-400" />
+            <input
+              type="text"
+              value={countySearch}
+              onChange={e => setCountySearch(e.target.value)}
+              placeholder={`Search ${counties.length} counties…`}
+              className="w-full pl-8 pr-8 py-1.5 border hairline bg-white rounded-sm text-[12px] focus:outline-none focus:hairline-strong"
+            />
+            {countySearch && (
+              <button
+                onClick={() => setCountySearch('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-900"
+                title="Clear search"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          <div className="flex items-center justify-between mb-1.5">
+            <div className="mono text-[10px] uppercase tracking-widest text-stone-500">
+              {countySearch ? (
+                <>{filteredCounties.length} of {counties.length} counties · {STATES.find(s => s.fips === pickerState)?.name}</>
+              ) : (
+                <>{counties.length} counties in {STATES.find(s => s.fips === pickerState)?.name}</>
+              )}
+            </div>
+            <button
+              onClick={() => {
+                // Select all currently visible (filtered) counties
+                const newRefs = [...countyRefs];
+                const existing = new Set(countyRefs.filter(r => r.stateFips === pickerState).map(r => r.countyFips));
+                filteredCounties.forEach(c => {
+                  if (!existing.has(c.fips)) {
+                    newRefs.push({
+                      stateFips: pickerState,
+                      countyFips: c.fips,
+                      name: `${c.fullName}, ${STATES.find(s => s.fips === pickerState)?.name}`,
+                    });
+                  }
+                });
+                setCountyRefs(newRefs);
+              }}
+              className="text-[11px] text-stone-600 hover:text-stone-900 underline underline-offset-2"
+              disabled={filteredCounties.length === 0}
+            >{countySearch ? `Select ${filteredCounties.length} matching` : 'Select all'}</button>
+          </div>
+
+          {filteredCounties.length === 0 ? (
+            <div className="border hairline rounded-sm py-6 px-3 bg-white text-center text-[12px] text-stone-500 italic">
+              No counties match "{countySearch}".
+            </div>
+          ) : (
+            <div className="border hairline rounded-sm max-h-64 overflow-y-auto scrollbar-thin bg-white">
+              <div className="divide-y hairline">
+                {filteredCounties.map(c => {
+                  const selected = isSelected(pickerState, c.fips);
+                  return (
+                    <label
+                      key={c.fips}
+                      className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-stone-50 ${selected ? 'bg-stone-100' : ''}`}
+                    >
+                      <div className={`w-3.5 h-3.5 border flex items-center justify-center flex-shrink-0 ${selected ? 'bg-stone-900 border-stone-900' : 'border-stone-400'}`}>
+                        {selected && <Check className="w-2.5 h-2.5 text-stone-50" />}
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={() => toggleCounty(pickerState, c.fips, c.fullName)}
+                        className="hidden"
+                      />
+                      <div className="flex-1 text-[13px] text-stone-800">{c.fullName}</div>
+                      <div className="mono text-[10px] text-stone-400">{pickerState}{c.fips}</div>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {countyRefs.length > 0 && (
+        <div>
+          <div className="mono text-[10px] uppercase tracking-widest text-stone-500 mb-2">
+            {countyRefs.length} selected{multi ? ' · counties from different states can be combined' : ''}
+          </div>
+          <div className="flex flex-wrap gap-1.5 mb-3">
+            {countyRefs.map(r => (
+              <span
+                key={`${r.stateFips}${r.countyFips}`}
+                className="inline-flex items-center gap-1.5 px-2 py-1 bg-white border hairline rounded-sm text-[11px]"
+              >
+                <span>{r.name}</span>
+                <button
+                  onClick={() => setCountyRefs(countyRefs.filter(x => !(x.stateFips === r.stateFips && x.countyFips === r.countyFips)))}
+                  className="text-stone-400 hover:text-stone-900"
+                ><X className="w-3 h-3" /></button>
+              </span>
+            ))}
+            {multi && countyRefs.length > 0 && (
+              <button
+                onClick={() => setCountyRefs([])}
+                className="text-[11px] text-stone-500 hover:text-red-700 underline underline-offset-2 px-2 py-1"
+              >Clear all</button>
+            )}
+          </div>
+
+          {/* Done / Edit buttons — only for multi mode */}
+          {multi && !confirmed && (
+            <button
+              onClick={onConfirm}
+              className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 py-2 bg-stone-900 text-stone-50 rounded-sm hover:bg-stone-800 lift text-sm"
+            >
+              <Check className="w-3.5 h-3.5" /> Done selecting — continue to variables
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+          )}
+
+          {multi && confirmed && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 border border-emerald-300 rounded-sm text-[11px] text-emerald-900">
+                <Check className="w-3 h-3" /> Selection confirmed
+              </div>
+              <button
+                onClick={onEditAgain}
+                className="text-[11px] text-stone-600 hover:text-stone-900 underline underline-offset-2"
+              >Edit selection</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MSAPicker({ msaCodes, setMsaCodes, multi, confirmed, onConfirm, onEditAgain }) {
+  const [query, setQuery] = useState('');
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [dropdownRect, setDropdownRect] = useState(null);
+  const inputRef = useRef(null);
+  const dropdownRef = useRef(null);
+
+  const matches = useMemo(() => {
+    const entries = Object.entries(MSA_COUNTIES).map(([code, info]) => ({ code, ...info }));
+    const selectedSet = new Set(msaCodes);
+    // In multi mode, filter out already-selected MSAs from the dropdown
+    const filtered = multi ? entries.filter(e => !selectedSet.has(e.code)) : entries;
+    if (!query.trim()) return filtered.slice(0, 20);
+    const q = query.toLowerCase();
+    return filtered.filter(m => m.name.toLowerCase().includes(q) || m.code.includes(q)).slice(0, 30);
+  }, [query, msaCodes, multi]);
+
+  // Track input position for fixed-position dropdown (escapes parent overflow:hidden)
+  useEffect(() => {
+    if (!showDropdown || !inputRef.current) return;
+    function updateRect() {
+      const rect = inputRef.current?.getBoundingClientRect();
+      if (rect) setDropdownRect({ top: rect.bottom + 4, left: rect.left, width: rect.width });
+    }
+    updateRect();
+    window.addEventListener('scroll', updateRect, true);
+    window.addEventListener('resize', updateRect);
+    return () => {
+      window.removeEventListener('scroll', updateRect, true);
+      window.removeEventListener('resize', updateRect);
+    };
+  }, [showDropdown]);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    if (!showDropdown) return;
+    function onClickOutside(e) {
+      if (
+        inputRef.current && !inputRef.current.contains(e.target) &&
+        dropdownRef.current && !dropdownRef.current.contains(e.target)
+      ) {
+        setShowDropdown(false);
+      }
+    }
+    document.addEventListener('mousedown', onClickOutside);
+    return () => document.removeEventListener('mousedown', onClickOutside);
+  }, [showDropdown]);
+
+  function pickMSA(code) {
+    if (multi) {
+      // Add to array if not already there
+      if (!msaCodes.includes(code)) setMsaCodes([...msaCodes, code]);
+    } else {
+      // Single mode: replace + auto-confirm
+      setMsaCodes([code]);
+      onConfirm?.();
+    }
+    setQuery('');
+    setShowDropdown(false);
+  }
+
+  function removeMSA(code) {
+    setMsaCodes(msaCodes.filter(c => c !== code));
+  }
+
+  // Single-mode display when selected
+  const singleSelected = !multi && msaCodes.length === 1 ? MSA_COUNTIES[msaCodes[0]] : null;
+
+  return (
+    <div className="fadein">
+      <label className="mono text-[10px] uppercase tracking-widest text-stone-500 block mb-2">
+        {multi ? 'Metro / Micropolitan Areas' : 'Metro / Micropolitan Area'}
+      </label>
+
+      {singleSelected ? (
+        <div className="border hairline-strong bg-white p-3 rounded-sm mb-2">
+          <div className="flex items-baseline justify-between gap-3 flex-wrap">
+            <div className="flex-1 min-w-0">
+              <div className="serif text-base leading-tight">{singleSelected.name}</div>
+              <div className="mono text-[10px] text-stone-500 mt-1">CBSA {msaCodes[0]} · {singleSelected.counties.length} counties</div>
+            </div>
+            <button onClick={() => setMsaCodes([])}
+              className="text-xs text-stone-500 hover:text-stone-900 underline underline-offset-2">change</button>
+          </div>
+          <details className="mt-2">
+            <summary className="cursor-pointer text-[11px] text-stone-500 hover:text-stone-900 select-none">See counties included</summary>
+            <div className="mt-2 mono text-[10px] text-stone-600 leading-relaxed">
+              {singleSelected.counties.join(', ')}
+            </div>
+          </details>
+        </div>
+      ) : (
+        <>
+          {/* Search input */}
+          <div className="relative mb-3">
+            <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-stone-400" />
+            <input
+              ref={inputRef}
+              type="text"
+              value={query}
+              onChange={e => { setQuery(e.target.value); setShowDropdown(true); }}
+              onFocus={() => setShowDropdown(true)}
+              placeholder="Search: Houston, Atlanta, Memphis, Jackson…"
+              className="w-full pl-9 pr-3 py-2 border hairline bg-white rounded-sm text-sm focus:outline-none focus:hairline-strong"
+            />
+          </div>
+
+          {/* Fixed-position dropdown — renders outside overflow:hidden parents */}
+          {showDropdown && matches.length > 0 && dropdownRect && (
+            <div
+              ref={dropdownRef}
+              className="max-h-64 overflow-y-auto scrollbar-thin border hairline-strong bg-white rounded-sm shadow-lg"
+              style={{
+                position: 'fixed',
+                top: `${dropdownRect.top}px`,
+                left: `${dropdownRect.left}px`,
+                width: `${dropdownRect.width}px`,
+                zIndex: 50,
+              }}
+            >
+              {matches.map(m => (
+                <button
+                  key={m.code}
+                  onClick={() => pickMSA(m.code)}
+                  className="w-full text-left px-3 py-2 hover:bg-stone-100 border-b hairline last:border-b-0"
+                >
+                  <div className="text-[13px] text-stone-900">{m.name}</div>
+                  <div className="mono text-[10px] text-stone-500 mt-0.5">CBSA {m.code} · {m.counties.length} counties</div>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {showDropdown && matches.length === 0 && dropdownRect && (
+            <div
+              ref={dropdownRef}
+              className="border hairline-strong bg-white rounded-sm shadow-lg p-3 text-[12px] text-stone-500 italic"
+              style={{
+                position: 'fixed',
+                top: `${dropdownRect.top}px`,
+                left: `${dropdownRect.left}px`,
+                width: `${dropdownRect.width}px`,
+                zIndex: 50,
+              }}
+            >
+              {multi && msaCodes.length > 0 ? 'No more matches — all matching MSAs are already selected.' : 'No MSAs match.'}
+            </div>
+          )}
+
+          <div className="text-[11px] text-stone-500 leading-relaxed">
+            Only the ~75 largest MSAs are indexed for direct selection. For smaller CBSAs, use multi-county selection above.
+          </div>
+        </>
+      )}
+
+      {/* Multi-mode chips + confirm step */}
+      {multi && msaCodes.length > 0 && (
+        <div className="mt-4">
+          <div className="mono text-[10px] uppercase tracking-widest text-stone-500 mb-2">
+            {msaCodes.length} MSA{msaCodes.length > 1 ? 's' : ''} selected · totals{' '}
+            {msaCodes.reduce((sum, c) => sum + (MSA_COUNTIES[c]?.counties.length || 0), 0)} counties
+          </div>
+          <div className="flex flex-wrap gap-1.5 mb-3">
+            {msaCodes.map(code => {
+              const msa = MSA_COUNTIES[code];
+              if (!msa) return null;
+              return (
+                <span
+                  key={code}
+                  className="inline-flex items-center gap-1.5 px-2 py-1 bg-white border hairline rounded-sm text-[11px]"
+                >
+                  <span className="truncate max-w-xs">{msa.name.split(',')[0]}</span>
+                  <span className="mono text-[9px] text-stone-400">{code}</span>
+                  <button
+                    onClick={() => removeMSA(code)}
+                    className="text-stone-400 hover:text-stone-900"
+                  ><X className="w-3 h-3" /></button>
+                </span>
+              );
+            })}
+            {msaCodes.length > 0 && (
+              <button
+                onClick={() => setMsaCodes([])}
+                className="text-[11px] text-stone-500 hover:text-red-700 underline underline-offset-2 px-2 py-1"
+              >Clear all</button>
+            )}
+          </div>
+
+          {!confirmed && (
+            <button
+              onClick={onConfirm}
+              className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 py-2 bg-stone-900 text-stone-50 rounded-sm hover:bg-stone-800 lift text-sm"
+            >
+              <Check className="w-3.5 h-3.5" /> Done selecting — continue to variables
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+          )}
+
+          {confirmed && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 border border-emerald-300 rounded-sm text-[11px] text-emerald-900">
+                <Check className="w-3 h-3" /> Selection confirmed
+              </div>
+              <button
+                onClick={onEditAgain}
+                className="text-[11px] text-stone-600 hover:text-stone-900 underline underline-offset-2"
+              >Edit selection</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FilterScopeSummary({ filterScope }) {
+  if (!filterScope || filterScope.type === 'none') return null;
+  if (filterScope.type === 'state') {
+    const s = STATES.find(x => x.fips === filterScope.stateFips);
+    return <span>Statewide · {s?.name}</span>;
+  }
+  if (filterScope.type === 'counties') {
+    return <span>{filterScope.countyRefs?.length || 0} counties</span>;
+  }
+  if (filterScope.type === 'msa') {
+    const codes = filterScope.msaCodes || (filterScope.msaCode ? [filterScope.msaCode] : []);
+    if (codes.length === 0) return null;
+    if (codes.length === 1) {
+      const msa = MSA_COUNTIES[codes[0]];
+      if (!msa) return null;
+      return <span>MSA · {msa.name.split(',')[0]}</span>;
+    }
+    return <span>{codes.length} MSAs</span>;
+  }
+  return null;
+}
+
+// ============================================================================
+// SUB-COMPONENTS
+// ============================================================================
+
+function GeoCard({ g, selected, onSelect }) {
+  const meta = GEOGRAPHIES[g];
+  return (
+    <button onClick={onSelect}
+      className={`text-left p-4 border lift rounded-sm ${selected ? 'hairline-strong bg-white shadow-sm' : 'hairline bg-white/60 hover:bg-white'}`}>
+      <div className="flex items-baseline justify-between mb-1">
+        <div className="serif text-base">{meta.label}</div>
+        <div className="mono text-[10px] text-stone-400 uppercase">{meta.vintages}</div>
+      </div>
+      <div className="text-[11px] text-stone-600 leading-snug">{meta.description}</div>
+    </button>
+  );
+}
+
+function Step({ n, label, active, done }) {
+  return (
+    <div className={`flex items-center gap-2 ${active ? 'text-stone-900' : done ? 'text-stone-700' : 'text-stone-400'}`}>
+      <span className={`w-5 h-5 inline-flex items-center justify-center border ${active ? 'hairline-strong bg-stone-900 text-stone-50' : done ? 'hairline-strong bg-white' : 'hairline bg-white'}`}>
+        {done ? <Check className="w-3 h-3" /> : <span className="text-[10px]">{n}</span>}
+      </span>
+      <span>{label}</span>
+    </div>
+  );
+}
+
+function SectionHeader({ number, title, onReset, canReset, collapsed, onExpand }) {
+  return (
+    <div className="flex items-baseline gap-3 mb-5">
+      <div className="mono text-[10px] uppercase tracking-widest text-stone-400">{number}</div>
+      {collapsed && onExpand ? (
+        <button
+          onClick={onExpand}
+          className="serif text-xl tracking-tight text-stone-700 hover:text-stone-900 inline-flex items-baseline gap-2 group"
+          title="Click to expand this step"
+        >
+          <span>{title}</span>
+          <ChevronRight className="w-3.5 h-3.5 self-center text-stone-400 group-hover:text-stone-700 transition-transform group-hover:translate-x-0.5" strokeWidth={1.75} />
+        </button>
+      ) : (
+        <h2 className="serif text-xl tracking-tight">{title}</h2>
+      )}
+      <div className="flex-1 h-px bg-stone-200 ml-3" />
+      {canReset && onReset && (
+        <button
+          onClick={onReset}
+          className="inline-flex items-center gap-1 mono text-[10px] uppercase tracking-widest text-red-600 hover:text-red-800 hover:bg-red-50 px-2 py-1 rounded-sm border border-red-200 hover:border-red-300 lift"
+          title="Reset this step and all steps below"
+        >
+          <RotateCcw className="w-3 h-3" strokeWidth={2.25} />
+          reset
+        </button>
+      )}
+    </div>
+  );
+}
+
+// Wraps a step. When `collapsed` is true, the body is hidden via a CSS grid trick
+// that animates height smoothly without measurement.
+// (Currently not used directly — the pattern is inlined per-step since each step
+// has a slightly different collapse condition. Kept here for reference/future use.)
+
+function Row({ icon, label, value, sub, mono }) {
+  return (
+    <div className="flex items-baseline gap-3">
+      <div className="text-stone-400">{icon}</div>
+      <div className="flex-1">
+        <div className="mono text-[10px] uppercase tracking-widest text-stone-500">{label}</div>
+        <div className={`${mono ? 'mono text-base' : 'text-sm'} text-stone-900`}>{value}</div>
+        {sub && <div className="text-[11px] text-stone-500">{sub}</div>}
+      </div>
+    </div>
+  );
+}
+
+function VariableBreadcrumb({ universe, table, onUniverseClick, onTableClick, onOpenSearch }) {
+  return (
+    <div className="mb-5 flex items-center justify-between gap-3 flex-wrap">
+      <div className="flex items-center gap-1.5 text-xs text-stone-500 flex-wrap">
+        {!universe && (<span className="text-stone-900">Choose a universe to begin →</span>)}
+        {universe && (
+          <>
+            <button onClick={onUniverseClick} className="hover:text-stone-900 underline underline-offset-2">Universes</button>
+            <ChevronRight className="w-3 h-3 text-stone-300" />
+            {!table ? (
+              <span className="text-stone-900 font-medium">{UNIVERSES[universe]?.label}</span>
+            ) : (
+              <>
+                <button onClick={onTableClick} className="hover:text-stone-900 underline underline-offset-2">{UNIVERSES[universe]?.label}</button>
+                <ChevronRight className="w-3 h-3 text-stone-300" />
+                <span className="mono text-[11px] text-stone-900">{table.id}</span>
+              </>
+            )}
+          </>
+        )}
+      </div>
+      <button onClick={onOpenSearch}
+        className="inline-flex items-center gap-1.5 px-2.5 py-1 border hairline rounded-full text-[11px] text-stone-700 hover:bg-stone-100 lift">
+        <Search className="w-3 h-3" /> Search all variables
+      </button>
+    </div>
+  );
+}
+
+function RecommendationWizard({ answers, setAnswers, onApply, onCancel }) {
+  const set = (k, v) => setAnswers(prev => ({ ...prev, [k]: v }));
+  const ready = answers.recency && answers.geoSize && answers.focus !== undefined && answers.needsBlocks !== undefined;
+  const rec = ready ? recommendDataset(answers) : null;
+  const Q = ({ label, k, options }) => (
+    <div className="mb-4">
+      <div className="text-xs text-stone-700 mb-2">{label}</div>
+      <div className="flex flex-wrap gap-1.5">
+        {options.map(([val, lbl]) => (
+          <button key={String(val)} onClick={() => set(k, val)}
+            className={`px-3 py-1.5 text-xs border rounded-sm lift ${answers[k] === val ? 'hairline-strong bg-stone-900 text-stone-50' : 'hairline bg-white hover:bg-stone-100'}`}>
+            {lbl}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+  return (
+    <div className="border hairline-strong bg-white p-5 rounded-sm mb-6 fadein">
+      <div className="flex items-center justify-between mb-4">
+        <div className="serif text-base">Quick guide</div>
+        <button onClick={onCancel} className="text-[11px] text-stone-500 hover:text-stone-900">close</button>
+      </div>
+      <Q label="How current does the data need to be?" k="recency" options={[['most_current', 'Most current available'], ['stable_ok', 'A stable estimate is fine']]} />
+      <Q label="What size area are you analyzing?" k="geoSize" options={[['small', 'Small (tract, block group, small town)'], ['large', 'Large (city ≥65k, county, metro, state)']]} />
+      <Q label="Do you need data at the census block level?" k="needsBlocks" options={[[true, 'Yes'], [false, 'No']]} />
+      <Q label="Primary focus of the analysis?" k="focus" options={[['general', 'General demographics & socioeconomics'], ['race_ethnicity_total', 'Race/ethnicity total counts'], ['housing_econ', 'Housing, income, transportation']]} />
+      {rec && (
+        <div className="mt-5 pt-4 border-t hairline">
+          <div className="mono text-[10px] uppercase tracking-widest text-stone-500 mb-1">Recommended</div>
+          <div className="serif text-lg mb-1">{DATASETS[rec].label}</div>
+          <div className="text-xs text-stone-600 mb-4">{DATASETS[rec].tradeoff}</div>
+          <button onClick={onApply}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-stone-900 text-stone-50 text-xs rounded-sm hover:bg-stone-800 lift">
+            Use this dataset <ChevronRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PreviewTable({ data, varLabelMap }) {
+  const [headers, ...rows] = data;
+  const previewRows = rows.slice(0, 10);
+  return (
+    <div className="overflow-x-auto -mx-2 scrollbar-thin">
+      <table className="w-full text-[11px]">
+        <thead>
+          <tr className="border-b hairline-strong">
+            {headers.map((h, i) => (
+              <th key={i} className="text-left py-2 px-2 mono text-[9px] uppercase tracking-widest text-stone-500 font-normal whitespace-nowrap">
+                <div>{varLabelMap[h] || h}</div>
+                {varLabelMap[h] && <div className="mono text-[8px] text-stone-400 normal-case mt-0.5">{h}</div>}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {previewRows.map((row, ri) => (
+            <tr key={ri} className="border-b hairline hover:bg-stone-50">
+              {row.map((cell, ci) => {
+                const isNumeric = headers[ci] !== 'NAME' && !isNaN(parseFloat(cell));
+                const num = parseFloat(cell);
+                const display = isNumeric && !isNaN(num) ? num.toLocaleString() : cell;
+                const isNegative = isNumeric && num < 0;
+                return (
+                  <td key={ci} className={`py-2 px-2 align-top ${isNumeric ? 'mono text-right' : ''} ${isNegative ? 'text-stone-400 italic' : 'text-stone-800'}`}>
+                    {isNegative ? '—' : display}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {rows.length > 10 && (
+        <div className="text-[10px] text-stone-500 mt-3 px-2 italic">
+          Showing first 10 of {rows.length.toLocaleString()} rows. Negative values are Census-reserved suppression codes. Use the CSV download for the full result set.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ShapefileExport({ shapefile }) {
+  const [copied, setCopied] = useState(false);
+  function copyUrl() {
+    navigator.clipboard.writeText(shapefile.url);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
+  return (
+    <div className="space-y-4">
+      <div className="text-xs text-stone-700 leading-relaxed">
+        Download the matching TIGER/Line shapefile and join it to your CSV in QGIS or ArcGIS using the <span className="mono bg-stone-200 px-1 py-0.5 text-[10px]">GEOID</span> field. Boundary vintage: <span className="mono">{shapefile.tigerYear}</span> · Scope: <span className="font-medium">{shapefile.scope}</span>.
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <a href={shapefile.url} target="_blank" rel="noopener noreferrer"
+          className="inline-flex items-center gap-1.5 px-3 py-2 border hairline-strong bg-white text-stone-900 rounded-sm hover:bg-stone-100 lift text-xs">
+          <Download className="w-3.5 h-3.5" /> Download shapefile (.zip)
+          <ExternalLink className="w-3 h-3 opacity-60" />
+        </a>
+        <button onClick={copyUrl}
+          className="inline-flex items-center gap-1.5 px-3 py-2 border hairline rounded-sm hover:bg-white lift text-xs">
+          {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+          {copied ? 'Copied' : 'Copy URL'}
+        </button>
+      </div>
+      <details className="text-[11px] text-stone-600">
+        <summary className="cursor-pointer hover:text-stone-900 select-none flex items-center gap-1.5">
+          <FileText className="w-3 h-3" /> How to join in GIS
+        </summary>
+        <div className="pl-4 pt-2 leading-relaxed space-y-1.5">
+          <div>1. Unzip the TIGER shapefile and load it into your GIS.</div>
+          <div>2. The shapefile's <span className="mono">GEOID</span> field matches the concatenated <span className="mono">state + county + tract + block group + block</span> codes in your CSV.</div>
+          <div>3. Use a table join (QGIS: <em>Properties → Joins</em>; ArcGIS: <em>Joins and Relates</em>) on GEOID to attach the data.</div>
+          <div>4. Save as a new layer or export to GeoPackage / GeoJSON.</div>
+        </div>
+      </details>
+      <div className="text-[10px] text-stone-500 mono break-all bg-stone-100 p-2 rounded-sm">{shapefile.url}</div>
+    </div>
+  );
+}
+
+function VariableSearchModal({ onClose, loading, error, catalog, query, setQuery, filtered, selectedVars, toggleVar, datasetLabel, year }) {
+  const inputRef = useRef(null);
+  useEffect(() => { if (inputRef.current) inputRef.current.focus(); }, []);
+  useEffect(() => {
+    function onKey(e) { if (e.key === 'Escape') onClose(); }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-50 bg-stone-900/40 backdrop-blur-sm flex items-start justify-center p-4 md:p-12 fadein">
+      <div className="bg-stone-50 border hairline-strong rounded-sm shadow-2xl w-full max-w-3xl max-h-[85vh] flex flex-col">
+        <div className="border-b hairline-strong px-6 py-4 flex items-center justify-between">
+          <div>
+            <div className="serif text-xl">Variable Catalog</div>
+            <div className="mono text-[10px] uppercase tracking-widest text-stone-500 mt-1">
+              {datasetLabel} · {year} · {catalog ? `${catalog.length.toLocaleString()} variables` : 'loading…'}
+            </div>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-stone-100 rounded-sm"><X className="w-4 h-4" /></button>
+        </div>
+        <div className="px-6 py-4 border-b hairline">
+          <div className="relative">
+            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-stone-400" />
+            <input ref={inputRef} type="text" value={query} onChange={e => setQuery(e.target.value)}
+              placeholder="Try: median income, vehicles available, commute time, B19013..."
+              className="w-full pl-10 pr-3 py-2.5 border hairline bg-white rounded-sm text-sm focus:outline-none focus:hairline-strong" />
+          </div>
+          <div className="text-[11px] text-stone-500 mt-2">
+            Search by keyword, concept, or variable code. Multiple keywords combined with AND.
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto scrollbar-thin px-6 py-4">
+          {loading && (
+            <div className="flex items-center gap-3 text-stone-500 text-sm py-8 justify-center">
+              <Loader2 className="w-4 h-4 animate-spin" /> Loading the full variable catalog…
+            </div>
+          )}
+          {error && (
+            <div className="text-xs text-red-700 bg-red-50 border border-red-200 p-3 rounded-sm">
+              <div className="font-medium mb-1">Failed to load catalog</div>
+              <div className="mono text-[10px]">{error}</div>
+            </div>
+          )}
+          {!loading && !error && catalog && !query.trim() && (
+            <div className="text-center py-12 text-stone-500">
+              <Search className="w-8 h-8 mx-auto mb-3 opacity-30" />
+              <div className="text-sm serif italic">Type to search {catalog.length.toLocaleString()} variables.</div>
+            </div>
+          )}
+          {!loading && !error && catalog && query.trim() && filtered.length === 0 && (
+            <div className="text-center py-12 text-stone-500"><div className="text-sm">No matches for "{query}".</div></div>
+          )}
+          {!loading && filtered.length > 0 && (
+            <div className="space-y-1">
+              {filtered.map(v => {
+                const checked = !!selectedVars.find(s => s.code === v.code);
+                return (
+                  <label key={v.code}
+                    className={`flex items-start gap-3 px-3 py-2.5 border rounded-sm cursor-pointer lift ${checked ? 'hairline-strong bg-white' : 'hairline bg-white/60 hover:bg-white'}`}>
+                    <div className={`w-4 h-4 mt-0.5 border flex items-center justify-center flex-shrink-0 ${checked ? 'bg-stone-900 border-stone-900' : 'border-stone-400'}`}>
+                      {checked && <Check className="w-3 h-3 text-stone-50" />}
+                    </div>
+                    <input type="checkbox" checked={checked}
+                      onChange={() => toggleVar({ code: v.code, label: `${v.concept}: ${v.label}`, tableId: v.tableId, universe: inferUniverseFromConcept(v.concept) })}
+                      className="hidden" />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[11px] text-stone-500 mb-0.5">{v.concept}</div>
+                      <div className="text-sm leading-snug text-stone-900">{v.label}</div>
+                    </div>
+                    <div className="mono text-[10px] text-stone-400 flex-shrink-0 mt-0.5">{v.code}</div>
+                  </label>
+                );
+              })}
+              {filtered.length === 100 && (
+                <div className="text-[10px] text-stone-500 text-center py-3 italic">Showing first 100 matches. Refine your search to narrow further.</div>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="border-t hairline-strong px-6 py-3 flex items-center justify-between bg-white">
+          <div className="text-[11px] text-stone-500">
+            <span className="font-medium text-stone-900">{selectedVars.length}</span> variable{selectedVars.length !== 1 ? 's' : ''} selected
+          </div>
+          <button onClick={onClose}
+            className="inline-flex items-center gap-1.5 px-4 py-2 bg-stone-900 text-stone-50 rounded-sm hover:bg-stone-800 lift text-xs">
+            Done <ArrowRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// Mount the app once the component function is defined.
+const container = document.getElementById('root');
+const root = ReactDOM.createRoot(container);
+root.render(React.createElement(CensusExplorer));
+
+// Fade out loading screen after the first paint.
+requestAnimationFrame(() => {
+  const ls = document.getElementById('loading-screen');
+  if (ls) {
+    ls.classList.add('hide');
+    setTimeout(() => ls.remove(), 260);
+  }
+});
+</script>
+
+<script>
+  // Wait until both (a) the ES module bootstrap has exposed React/Lucide globally
+  // AND (b) Babel Standalone is loaded, then transpile and execute our component source.
+  function ready() {
+    const source = document.getElementById('app-source').textContent;
+    try {
+      const out = Babel.transform(source, {
+        presets: ['react'],
+        // No module transform needed — our source has no imports after processing.
+      }).code;
+      // Execute in global scope so `CensusExplorer` is reachable.
+      new Function(out)();
+    } catch (err) {
+      console.error('Failed to transpile or execute component:', err);
+      const root = document.getElementById('root');
+      const ls = document.getElementById('loading-screen');
+      if (ls) ls.remove();
+      root.innerHTML =
+        '<div style="max-width:640px; margin:80px auto; padding:24px; border:1px solid #1c1917; font-family:Georgia,serif;">' +
+          '<h2 style="margin:0 0 12px 0;">Something went wrong loading the app.</h2>' +
+          '<p style="margin:0 0 12px 0; color:#57534e;">Open the browser console for details.</p>' +
+          '<pre style="background:#f5f5f4; padding:12px; font-size:12px; overflow:auto; color:#b91c1c;">' +
+            (err && err.stack ? err.stack : String(err)) +
+          '</pre>' +
+        '</div>';
+    }
+  }
+
+  let modulesReady = !!(window.React && window.ReactDOM && window.__lucide);
+  let babelReady = !!window.Babel;
+
+  function maybeStart() { if (modulesReady && babelReady) ready(); }
+
+  if (!modulesReady) {
+    window.addEventListener('modules-ready', () => { modulesReady = true; maybeStart(); });
+  }
+  if (!babelReady) {
+    const check = setInterval(() => {
+      if (window.Babel) { babelReady = true; clearInterval(check); maybeStart(); }
+    }, 30);
+  }
+  maybeStart();
+</script>
+
+</body>
+</html>
